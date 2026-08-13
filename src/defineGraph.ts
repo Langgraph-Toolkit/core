@@ -17,6 +17,8 @@ import type {
   Gate,
   GateContext,
   GateDecision,
+  IntentAnalyzer,
+  IntentClassification,
   IntentClassifier,
   IntentContext,
   ToolContext,
@@ -171,6 +173,14 @@ export function intent<TInput extends object, TIntent extends string>(
   classify: (input: TInput, ctx: IntentContext) => TIntent | Promise<TIntent>,
 ): IntentClassifier<TInput, TIntent> {
   return { name, classify };
+}
+
+/** Create an LLM-backed intent analyzer that returns typed details and observability metadata. */
+export function intentAnalyzer<TInput extends object, TIntent extends string, TDetails extends JsonObject>(
+  name: string,
+  analyze: (input: TInput, ctx: IntentContext) => IntentClassification<TIntent, TDetails> | Promise<IntentClassification<TIntent, TDetails>>,
+): IntentAnalyzer<TInput, TIntent, TDetails> {
+  return { name, analyze };
 }
 
 /** Business risk classification for a node (Rule A4). */

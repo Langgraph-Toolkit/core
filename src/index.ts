@@ -17,7 +17,7 @@
  */
 
 // DSL
-export { defineGraph, node, edge, conditional, converge, safety, tier, stepLabel, schema, gate, tool, intent } from "./defineGraph.js";
+export { defineGraph, node, edge, conditional, converge, safety, tier, stepLabel, schema, gate, tool, intent, intentAnalyzer } from "./defineGraph.js";
 
 // Compiler + executor
 export { compile } from "./compile.js";
@@ -26,6 +26,8 @@ export { attachExecutor as buildGraph } from "./executor.js";
 
 // Registry (used by host adapters)
 export { GraphRegistry } from "./registry.js";
+export { ToolkitRuntime, createToolkitRuntime } from "./runtime.js";
+export type { ToolkitRuntimeConfigurator, ToolkitRuntimeOptions } from "./runtime.js";
 
 // State values / reducers
 export { messagesValue, reducedValue, isReducedField } from "./types.js";
@@ -124,6 +126,9 @@ export type {
   VerifierFn,
   VerifySpec,
   NodeContext,
+  IntentAnalyzer,
+  IntentClassification,
+  IntentAnalysis,
   QueuedJob,
   QueueAdapter,
   ReducedField,

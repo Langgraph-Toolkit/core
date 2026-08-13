@@ -15,6 +15,7 @@ import type {
   Actor,
   ChatMessage,
   ChatResult,
+  ChatStreamChunk,
   JsonObject,
   JsonValue,
   LLMProvider,
@@ -165,6 +166,7 @@ export class OpenAiCompatibleProvider implements LLMProvider {
       messages: messages.map((message) => ({ role: message.role, content: message.content })),
       max_tokens: this.cfg.maxTokens,
       temperature: this.cfg.temperature,
+      ...(this.cfg.reasoningEffort === undefined ? {} : { reasoning_effort: this.cfg.reasoningEffort }),
       stream: opts?.stream ?? false,
     };
     const res = await fetch(url, {
@@ -198,7 +200,7 @@ export class OpenAiCompatibleProvider implements LLMProvider {
     };
   }
 
-  async *stream(messages: ChatMessage[], opts?: { signal?: AbortSignal }): AsyncIterable<string> {
+  async *streamDetailed(messages: ChatMessage[], opts?: { signal?: AbortSignal }): AsyncIterable<import("./types.js").ChatStreamChunk> {
     const res = (await this.fetchJson(messages, { ...opts, stream: true })) as Response;
     const reader = res.body?.getReader();
     if (!reader) return;
@@ -217,14 +219,26 @@ export class OpenAiCompatibleProvider implements LLMProvider {
         if (payload === "[DONE]") return;
         try {
           const parsed = JSON.parse(payload) as {
-            choices?: Array<{ delta?: { content?: string } }>;
+            choices?: Array<{ delta?: { content?: string; reasoning_content?: string; reasoning?: string } }>;
+            usage?: { prompt_tokens?: number; completion_tokens?: number };
           };
+          const reasoning = parsed.choices?.[0]?.delta?.reasoning_content ?? parsed.choices?.[0]?.delta?.reasoning;
+          if (reasoning) yield { type: "reasoning", value: reasoning };
           const delta = parsed.choices?.[0]?.delta?.content;
-          if (delta) yield delta;
+          if (delta) yield { type: "token", value: delta };
+          if (parsed.usage?.prompt_tokens !== undefined && parsed.usage?.completion_tokens !== undefined) {
+            yield { type: "usage", value: { inputTokens: parsed.usage.prompt_tokens, outputTokens: parsed.usage.completion_tokens } };
+          }
         } catch {
-          // ignore malformed chunk
+          // Ignore malformed vendor chunks while keeping the stream alive.
         }
       }
+    }
+  }
+
+  async *stream(messages: ChatMessage[], opts?: { signal?: AbortSignal }): AsyncIterable<string> {
+    for await (const chunk of this.streamDetailed(messages, opts)) {
+      if (chunk.type === "token") yield chunk.value;
     }
   }
 }
@@ -279,7 +293,7 @@ export class HuggingFaceProvider implements LLMProvider {
     };
   }
 
-  async *stream(messages: ChatMessage[], opts?: { signal?: AbortSignal }): AsyncIterable<string> {
+  async *streamDetailed(messages: ChatMessage[], opts?: { signal?: AbortSignal }): AsyncIterable<ChatStreamChunk> {
     const res = await fetch(`https://router.huggingface.co/v1/chat/completions`, {
       method: "POST",
       headers: {
@@ -315,13 +329,27 @@ export class HuggingFaceProvider implements LLMProvider {
         const payload = trimmed.slice(5).trim();
         if (payload === "[DONE]") return;
         try {
-          const parsed = JSON.parse(payload) as { choices?: Array<{ delta?: { content?: string } }> };
+          const parsed = JSON.parse(payload) as {
+            choices?: Array<{ delta?: { content?: string; reasoning_content?: string; reasoning?: string } }>;
+            usage?: { prompt_tokens?: number; completion_tokens?: number };
+          };
+          const reasoning = parsed.choices?.[0]?.delta?.reasoning_content ?? parsed.choices?.[0]?.delta?.reasoning;
+          if (reasoning) yield { type: "reasoning", value: reasoning };
           const delta = parsed.choices?.[0]?.delta?.content;
-          if (delta) yield delta;
+          if (delta) yield { type: "token", value: delta };
+          if (parsed.usage?.prompt_tokens !== undefined && parsed.usage?.completion_tokens !== undefined) {
+            yield { type: "usage", value: { inputTokens: parsed.usage.prompt_tokens, outputTokens: parsed.usage.completion_tokens } };
+          }
         } catch {
           // ignore
         }
       }
+    }
+  }
+
+  async *stream(messages: ChatMessage[], opts?: { signal?: AbortSignal }): AsyncIterable<string> {
+    for await (const chunk of this.streamDetailed(messages, opts)) {
+      if (chunk.type === "token") yield chunk.value;
     }
   }
 }
@@ -332,10 +360,21 @@ export class MockProvider implements LLMProvider {
   constructor(private cfg: LLMProviderConfig) {
     this.name = `mock:${cfg.model}`;
   }
+
+  private response(): string {
+    return this.cfg.mockResponse ?? `mock:${this.cfg.model}:${1}`;
+  }
+
   async chat(messages: ChatMessage[]): Promise<ChatResult> {
-    return { content: `mock:${this.cfg.model}:${messages.length}`, usage: { inputTokens: 0, outputTokens: 0 } };
+    return { content: this.cfg.mockResponse ?? `mock:${this.cfg.model}:${messages.length}`, usage: { inputTokens: 0, outputTokens: 0 } };
+  }
+  async *streamDetailed(): AsyncIterable<ChatStreamChunk> {
+    yield { type: "token", value: this.response() };
+    yield { type: "usage", value: { inputTokens: 0, outputTokens: this.response().length } };
   }
   async *stream(): AsyncIterable<string> {
-    yield "mock-stream";
+    for await (const chunk of this.streamDetailed()) {
+      if (chunk.type === "token") yield chunk.value;
+    }
   }
 }

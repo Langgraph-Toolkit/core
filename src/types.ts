@@ -103,7 +103,31 @@ export interface IntentClassifier<TInput extends object, TIntent extends string>
   readonly name: string;
   readonly classify: (input: TInput, ctx: IntentContext) => TIntent | Promise<TIntent>;
 }
-export interface IntentContext { readonly threadId: string; readonly runId: string; readonly actor?: Actor; }
+export interface IntentAnalysis {
+  readonly confidence: number;
+  readonly language: string;
+  readonly tableHint?: string;
+  readonly needsClarification: boolean;
+}
+export interface IntentContext {
+  readonly threadId: string;
+  readonly runId: string;
+  readonly actor?: Actor;
+  readonly model: LLMSession;
+  readonly emitAnalysis: (analysis: IntentAnalysis) => void;
+  readonly emitToken: (value: string, index: number) => void;
+  readonly emitReasoning: (value: string, index: number) => void;
+  readonly emitUsage: (value: TokenUsage) => void;
+}
+export interface IntentClassification<TIntent extends string, TDetails extends JsonObject = JsonObject> {
+  readonly value: TIntent;
+  readonly details: TDetails;
+  readonly analysis: IntentAnalysis;
+}
+export interface IntentAnalyzer<TInput extends object, TIntent extends string, TDetails extends JsonObject = JsonObject> {
+  readonly name: string;
+  readonly analyze: (input: TInput, ctx: IntentContext) => IntentClassification<TIntent, TDetails> | Promise<IntentClassification<TIntent, TDetails>>;
+}
 export interface IntentSpec<TIntent extends string> { readonly values: readonly TIntent[]; readonly classifier?: IntentClassifier<object, TIntent>; }
 export interface StepDescriptor { readonly id: string; readonly label: string; readonly kind: "node" | "edge" | "graph"; }
 
@@ -126,6 +150,7 @@ export interface NodeContext<TState extends object = object, C extends GraphCont
   readonly ask: (request: InterruptRequest<C["interrupt"]>) => never;
   readonly callTool: <TArgs extends object, TResult extends JsonValue>(tool: ToolDefinition<TArgs, TResult>, args: TArgs) => Promise<TResult>;
   readonly detectIntent: <TInput extends object, TIntent extends string>(classifier: IntentClassifier<TInput, TIntent>, input: TInput) => Promise<TIntent>;
+  readonly analyzeIntent: <TInput extends object, TIntent extends string, TDetails extends JsonObject>(analyzer: IntentAnalyzer<TInput, TIntent, TDetails>, input: TInput) => Promise<IntentClassification<TIntent, TDetails>>;
 }
 export interface TierBinding { readonly tier: TierAlias; }
 export interface NodeSpec<TState extends object, C extends GraphContracts = DefaultGraphContracts, TVariables extends JsonObject = JsonObject, TGlobal extends JsonObject = JsonObject> {
@@ -223,7 +248,10 @@ export type StepEvent<TState extends object = object, C extends GraphContracts =
   | (StepEventBase & { readonly type: "node_end"; readonly data?: { readonly state?: TState; readonly latencyMs?: number } })
   | (StepEventBase & { readonly type: "edge"; readonly data: { readonly from: string; readonly to: string } })
   | (StepEventBase & { readonly type: "thinking"; readonly data: { readonly value: C["thinking"] } })
-  | (StepEventBase & { readonly type: "intent"; readonly data: { readonly name: string; readonly value: C["intent"] } })
+  | (StepEventBase & { readonly type: "token"; readonly data: { readonly value: string; readonly index: number } })
+  | (StepEventBase & { readonly type: "reasoning"; readonly data: { readonly value: string; readonly index: number } })
+  | (StepEventBase & { readonly type: "usage"; readonly data: { readonly tier: string; readonly value: TokenUsage } })
+  | (StepEventBase & { readonly type: "intent"; readonly data: { readonly name: string; readonly value: C["intent"]; readonly analysis?: IntentAnalysis } })
   | (StepEventBase & { readonly type: "answer"; readonly data: { readonly value: C["answer"] } })
   | (StepEventBase & { readonly type: "tool_start"; readonly data: { readonly name: string; readonly args: C["toolCall"] } })
   | (StepEventBase & { readonly type: "tool_end"; readonly data: { readonly name: string; readonly result: JsonValue } })
@@ -237,10 +265,25 @@ export interface CancellationSource { cancel(): void; isCancelled(): boolean; }
 export function createCancellationSource(): CancellationSource { let cancelled = false; return { cancel: () => { cancelled = true; }, isCancelled: () => cancelled }; }
 
 export interface ChatMessage { readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string; }
-export interface ChatResult { readonly content: string; readonly usage?: { readonly inputTokens: number; readonly outputTokens: number }; readonly finishReason?: string; readonly raw?: JsonValue; }
-export interface LLMProviderConfig { readonly driver: "openai" | "anthropic" | "huggingface" | "openai-compatible" | "mock"; readonly model: string; readonly apiKey?: string; readonly baseURL?: string; readonly provider?: string; readonly maxTokens?: number; readonly temperature?: number; readonly adapterRepo?: string; }
-export interface LLMProvider { readonly name: string; chat(messages: readonly ChatMessage[], opts?: { readonly signal?: AbortSignal }): Promise<ChatResult>; stream(messages: readonly ChatMessage[], opts?: { readonly signal?: AbortSignal }): AsyncIterable<string>; }
-export interface LLMSession { chat(messages: readonly ChatMessage[], opts?: { readonly signal?: AbortSignal }): Promise<ChatResult>; }
+export interface TokenUsage { readonly inputTokens: number; readonly outputTokens: number; }
+export type ChatStreamChunk =
+  | { readonly type: "token"; readonly value: string }
+  | { readonly type: "reasoning"; readonly value: string }
+  | { readonly type: "usage"; readonly value: TokenUsage };
+export interface ChatStreamOptions { readonly signal?: AbortSignal; }
+export interface ChatResult { readonly content: string; readonly usage?: TokenUsage; readonly finishReason?: string; readonly raw?: JsonValue; }
+export type ReasoningEffort = "none" | "low" | "medium" | "high";
+export interface LLMProviderConfig { readonly driver: "openai" | "anthropic" | "huggingface" | "openai-compatible" | "mock"; readonly model: string; readonly apiKey?: string; readonly baseURL?: string; readonly provider?: string; readonly maxTokens?: number; readonly temperature?: number; readonly reasoningEffort?: ReasoningEffort; readonly mockResponse?: string; readonly adapterRepo?: string; }
+export interface LLMProvider {
+  readonly name: string;
+  chat(messages: readonly ChatMessage[], opts?: ChatStreamOptions): Promise<ChatResult>;
+  stream(messages: readonly ChatMessage[], opts?: ChatStreamOptions): AsyncIterable<string>;
+  streamDetailed?(messages: readonly ChatMessage[], opts?: ChatStreamOptions): AsyncIterable<ChatStreamChunk>;
+}
+export interface LLMSession {
+  chat(messages: readonly ChatMessage[], opts?: ChatStreamOptions): Promise<ChatResult>;
+  streamDetailed?(messages: readonly ChatMessage[], opts?: ChatStreamOptions): AsyncIterable<ChatStreamChunk>;
+}
 export interface ModelRegistry { tier(alias: TierAlias): LLMProvider; reconfigure(tiers: Readonly<Record<string, LLMProviderConfig>>, factory: (cfg: LLMProviderConfig) => LLMProvider): void; tokenUsage: Map<string, { input: number; output: number }>; }
 
 export interface VerifierResult { readonly pass: boolean; readonly reason?: string; readonly anchors: readonly ("llm" | "code" | "test" | "http" | "db")[]; }

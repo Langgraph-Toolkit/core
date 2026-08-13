@@ -15,10 +15,14 @@ import type {
   Actor,
   Checkpoint,
   CompiledGraph,
+  IntentAnalysis,
+  IntentAnalyzer,
+  IntentClassification,
   IntentClassifier,
   JsonObject,
   JsonValue,
   NodeContext,
+  InterruptRequest,
   RunOptions,
   RunResult,
   StepEvent,
@@ -42,6 +46,48 @@ type RuntimeShape = {
   readonly reducer?: (prev: RuntimeField, next: RuntimeField) => RuntimeField;
 };
 type RuntimeMap = Record<string, RuntimeField | RuntimeShape | undefined>;
+
+type QueueResult<T> =
+  | { readonly kind: "value"; readonly value: T }
+  | { readonly kind: "closed" };
+
+/** Internal async queue that bridges node callbacks to the stream consumer. */
+class AsyncEventQueue<T> {
+  private readonly values: T[] = [];
+  private readonly waiters: Array<(result: QueueResult<T>) => void> = [];
+  private closed = false;
+
+  push(value: T): void {
+    if (this.closed) return;
+    const waiter = this.waiters.shift();
+    if (waiter) waiter({ kind: "value", value });
+    else this.values.push(value);
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    while (this.waiters.length > 0) this.waiters.shift()?.({ kind: "closed" });
+  }
+
+  next(): Promise<QueueResult<T>> {
+    const value = this.values.shift();
+    if (value !== undefined) return Promise.resolve({ kind: "value", value });
+    if (this.closed) return Promise.resolve({ kind: "closed" });
+    return new Promise<QueueResult<T>>((resolve) => this.waiters.push(resolve));
+  }
+
+  drain(): T[] {
+    const values = this.values.slice();
+    this.values.length = 0;
+    return values;
+  }
+}
+
+type NodeExecutionOutcome<TState extends object, C extends GraphContracts> =
+  | { readonly kind: "done"; readonly update: Partial<TState> }
+  | { readonly kind: "interrupt"; readonly request: InterruptRequest<C["interrupt"]> }
+  | { readonly kind: "error"; readonly error: Error };
 
 /**
  * Attach run()/stream() to a CompiledGraph, completing compile() output.
@@ -213,30 +259,62 @@ export function withTokenBudget(
   actor: Actor | undefined,
 ): import("./types.js").LLMProvider {
   if (!budget || !actor) return provider;
+  const reserve = (used: number, tier: string, spec: import("./types.js").TokenBudgetSpec, entry: { tokens: number; windowStart: number }): void => {
+    if (used <= 0) return;
+    if (entry.tokens + used > spec.limit) {
+      throw new TokenBudgetExceededError(tier, spec.limit);
+    }
+    entry.tokens += used;
+  };
+
+  const ledgerEntry = (tier: string, spec: import("./types.js").TokenBudgetSpec): { tokens: number; windowStart: number } => {
+    const key = `${actor.id}:${tier}`;
+    const now = Date.now();
+    const windowMs = spec.windowMs ?? 86400000;
+    let entry = tokenLedger.get(key);
+    if (!entry || now - entry.windowStart > windowMs) {
+      entry = { tokens: 0, windowStart: now };
+      tokenLedger.set(key, entry);
+    }
+    return entry;
+  };
+
   return {
     ...provider,
     async chat(messages, opts) {
       const tier = provider.name.split(":")[1] ?? "__default__";
       const spec = budget.perTier[tier];
       if (!spec || spec.limit <= 0) return provider.chat(messages, opts);
-      const key = `${actor.id}:${tier}`;
-      const now = Date.now();
-      const windowMs = spec.windowMs ?? 86400000;
-      let entry = tokenLedger.get(key);
-      if (!entry || now - entry.windowStart > windowMs) {
-        entry = { tokens: 0, windowStart: now };
-        tokenLedger.set(key, entry);
-      }
+      const entry = ledgerEntry(tier, spec);
       const current = provider;
       const result = await current.chat(messages, opts);
       const used = (result.usage?.inputTokens ?? 0) + (result.usage?.outputTokens ?? 0);
-      if (used > 0) {
-        if (entry.tokens + used > spec.limit) {
-          throw new TokenBudgetExceededError(tier, spec.limit);
-        }
-        entry.tokens += used;
-      }
+      reserve(used, tier, spec, entry);
       return result;
+    },
+    async *streamDetailed(messages, opts) {
+      const tier = provider.name.split(":")[1] ?? "__default__";
+      const spec = budget.perTier[tier];
+      if (!spec || spec.limit <= 0) {
+        if (provider.streamDetailed) {
+          yield* provider.streamDetailed(messages, opts);
+        } else {
+          for await (const value of provider.stream(messages, opts)) yield { type: "token", value };
+        }
+        return;
+      }
+      const entry = ledgerEntry(tier, spec);
+      const stream = provider.streamDetailed
+        ? provider.streamDetailed(messages, opts)
+        : (async function* (): AsyncIterable<import("./types.js").ChatStreamChunk> {
+            for await (const value of provider.stream(messages, opts)) yield { type: "token", value };
+          })();
+      for await (const chunk of stream) {
+        if (chunk.type === "usage") {
+          reserve(chunk.value.inputTokens + chunk.value.outputTokens, tier, spec, entry);
+        }
+        yield chunk;
+      }
     },
   };
 }
@@ -461,28 +539,27 @@ export async function* streamEvents<TState extends object, TInput extends object
         ? withTokenBudget(model, opts.tokenBudget, opts.actor)
         : undefined;
 
-      const emitted: StepEvent<TState>[] = [];
+      const eventQueue = new AsyncEventQueue<StepEvent<TState, C>>();
       const variables = { ...(graph.definition.variables ?? {}), ...(opts.variables ?? {}) } as JsonObject;
       const global = { ...(graph.definition.global ?? {}), ...(opts.global ?? {}) } as JsonObject;
+      const nodeModel = chargedModel ?? { chat: () => Promise.reject(new GraphRuntimeError("No model bound for this node; configure ModelRegistry (Rule T3).")) };
       const ctx: NodeContext<TState, C, TVariables, TGlobal> = {
         threadId,
         runId,
         emit(step) {
-          emitted.push(step);
+          eventQueue.push(step);
         },
         emitError(message, cause) {
           void message;
           void cause;
         },
-        model:
-          chargedModel ??
-          { chat: () => Promise.reject(new GraphRuntimeError("No model bound for this node; configure ModelRegistry (Rule T3).")) },
+        model: nodeModel,
         cancelled: () => cancellation?.isCancelled() ?? opts.signal?.aborted ?? false,
         variables: variables as TVariables,
         global: global as TGlobal,
         answer: wasPausedAtThisNode ? opts.humanResponse : undefined,
         think(value, label) {
-          emitted.push({ type: "thinking", graph: graph.name, threadId, runId, node, step: { id: `${node}:thinking`, label: label ?? "Thinking", kind: "node" }, ts: Date.now(), data: { value } });
+          eventQueue.push({ type: "thinking", graph: graph.name, threadId, runId, node, step: { id: `${node}:thinking`, label: label ?? "Thinking", kind: "node" }, ts: Date.now(), data: { value } });
         },
         interrupt(request) {
           throw new InterruptSignal(request);
@@ -491,15 +568,50 @@ export async function* streamEvents<TState extends object, TInput extends object
           throw new InterruptSignal(request);
         },
         async callTool(tool, args) {
-          emitted.push({ type: "tool_start", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { name: tool.name, args: args as C["toolCall"] } });
+          eventQueue.push({ type: "tool_start", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { name: tool.name, args: args as C["toolCall"] } });
           const result = await tool.execute(args, { threadId, runId, actor: opts.actor, variables, global });
-          emitted.push({ type: "tool_end", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { name: tool.name, result } });
+          eventQueue.push({ type: "tool_end", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { name: tool.name, result } });
           return result;
         },
         async detectIntent<TInput extends object, TIntent extends string>(classifier: IntentClassifier<TInput, TIntent>, value: TInput) {
-          const detected = await classifier.classify(value, { threadId, runId, actor: opts.actor });
-          emitted.push({ type: "intent", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { name: classifier.name, value: detected as C["intent"] } });
+          const detected = await classifier.classify(value, {
+            threadId,
+            runId,
+            actor: opts.actor,
+            model: nodeModel,
+            emitAnalysis: () => undefined,
+            emitToken: () => undefined,
+            emitReasoning: () => undefined,
+            emitUsage: () => undefined,
+          });
+          eventQueue.push({ type: "intent", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { name: classifier.name, value: detected as C["intent"] } });
           return detected;
+        },
+        async analyzeIntent<TInput extends object, TIntent extends string, TDetails extends JsonObject>(analyzer: IntentAnalyzer<TInput, TIntent, TDetails>, value: TInput): Promise<IntentClassification<TIntent, TDetails>> {
+          let tokenIndex = 0;
+          let reasoningIndex = 0;
+          let latestAnalysis: IntentAnalysis | undefined;
+          const result = await analyzer.analyze(value, {
+            threadId,
+            runId,
+            actor: opts.actor,
+            model: nodeModel,
+            emitAnalysis(analysis) {
+              latestAnalysis = analysis;
+            },
+            emitToken(value, index) {
+              eventQueue.push({ type: "token", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { value, index: index >= 0 ? index : tokenIndex++ } });
+            },
+            emitReasoning(value, index) {
+              eventQueue.push({ type: "reasoning", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { value, index: index >= 0 ? index : reasoningIndex++ } });
+            },
+            emitUsage(value) {
+              eventQueue.push({ type: "usage", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { tier: nodeSpec.binding?.tier ?? "__default__", value } });
+            },
+          });
+          const analysis = result.analysis ?? latestAnalysis;
+          eventQueue.push({ type: "intent", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { name: analyzer.name, value: result.value as C["intent"], ...(analysis === undefined ? {} : { analysis }) } });
+          return result;
         },
         log: (event) => {
           if (graph.definition.log !== false) {
@@ -510,24 +622,49 @@ export async function* streamEvents<TState extends object, TInput extends object
         actor: opts.actor,
       };
 
-      let update: Partial<TState>;
-      try {
-        const started = Date.now();
-        const result = nodeSpec.fn(state, ctx);
-        update = result instanceof Promise ? await Promise.race(timeoutPromise ? [result, timeoutPromise] : [result]) : result;
-        void started;
-      } catch (err) {
-        if (err instanceof InterruptSignal) {
-          yield { type: "interrupt", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { request: err.request, state, reason: "node" } };
-          await persist(graph, cp, threadId, state, node, round, { node, mode: "before", request: err.request });
-          return;
+      let nextEvent = eventQueue.next().then((result) => ({ kind: "event" as const, result }));
+      const nodeExecution = (async (): Promise<NodeExecutionOutcome<TState, C>> => {
+        try {
+          const result = nodeSpec.fn(state, ctx);
+          const update = result instanceof Promise
+            ? await Promise.race(timeoutPromise ? [result, timeoutPromise] : [result])
+            : result;
+          return { kind: "done", update };
+        } catch (err) {
+          if (err instanceof InterruptSignal) {
+            return { kind: "interrupt", request: err.request as unknown as InterruptRequest<C["interrupt"]> };
+          }
+          const error = err instanceof Error ? err : new Error(String(err));
+          eventQueue.push({ type: "error", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { error } });
+          return { kind: "error", error };
         }
-        const error = err instanceof Error ? err : new Error(String(err));
-        yield { type: "error", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { error } };
-        throw err;
+      })();
+
+      let outcome: NodeExecutionOutcome<TState, C> | undefined;
+      const nodeResult = nodeExecution.then((result) => ({ kind: "outcome" as const, result }));
+      while (outcome === undefined) {
+        const winner = await Promise.race([nodeResult, nextEvent]);
+        if (winner.kind === "outcome") {
+          outcome = winner.result;
+          break;
+        }
+        if (winner.result.kind === "value") {
+          yield winner.result.value;
+          nextEvent = eventQueue.next().then((result) => ({ kind: "event" as const, result }));
+        }
       }
 
-      for (const event of emitted) yield event;
+      eventQueue.close();
+      for (const event of eventQueue.drain()) yield event;
+
+      if (outcome === undefined) throw new GraphRuntimeError(`Node "${node}" completed without an outcome.`);
+      if (outcome.kind === "interrupt") {
+        yield { type: "interrupt", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { request: outcome.request, state, reason: "node" } };
+        await persist(graph, cp, threadId, state, node, round, { node, mode: "before", request: outcome.request });
+        return;
+      }
+      if (outcome.kind === "error") throw outcome.error;
+      const update = outcome.update;
 
       const before = JSON.stringify(state);
       state = mergeState(graph, state, update);
