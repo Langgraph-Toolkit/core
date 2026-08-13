@@ -1,0 +1,43 @@
+{
+  "name": "@langgraph/toolkit",
+  "version": "0.1.0",
+  "description": "Framework-agnostic LangGraph toolkit: defineGraph DSL, compile-time rule enforcement, run, stream, checkpointers and model registry. Works with any backend host.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "LICENSE",
+    "README.md",
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "peerDependencies": {
+    "@langchain/core": "^0.3",
+    "langgraph": "^0.2"
+  },
+  "peerDependenciesMeta": {
+    "langgraph": {
+      "optional": true
+    },
+    "@langchain/core": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.0"
+  }
+}
