@@ -174,7 +174,7 @@ function mergeState<TState extends object, TInput extends object = Partial<TStat
     }
     const casted = shape as RuntimeShape;
     if (casted.__reduced && casted.reducer) {
-      out[key] = casted.reducer(out[key], value) as RuntimeField;
+      out[key] = casted.reducer(out[key] as RuntimeField, value as RuntimeField);
     } else {
       out[key] = value as RuntimeField;
     }
