@@ -1,4 +1,4 @@
-/** Core public contracts for @langgraph/toolkit. */
+/** Core public contracts for @langgraph-toolkit/core. */
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | readonly JsonValue[] | { readonly [key: string]: JsonValue };

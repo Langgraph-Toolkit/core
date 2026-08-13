@@ -1,5 +1,5 @@
 /**
- * @langgraph/toolkit
+ * @langgraph-toolkit/core
  *
  * Framework-agnostic LangGraph toolkit. Define graphs once, run them on
  * Express, Fastify, NestJS, StruxJS, or a plain queue worker with zero
@@ -9,7 +9,7 @@
  *
  *   import { defineGraph, node, edge, conditional, compile, attachExecutor,
  *            messagesValue, safety, MemoryCheckpointer, ToolkitModelRegistry }
- *     from "@langgraph/toolkit";
+ *     from "@langgraph-toolkit/core";
  *
  *   const def = defineGraph({ name, state, nodes, entry, edges, safety, ... });
  *   const graph = attachExecutor(compile(def));

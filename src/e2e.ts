@@ -6,8 +6,8 @@
  * free: hosts are created by factories the contributor injects.
  *
  * @example
- *   import { GraphRegistry } from "@langgraph/toolkit";
- *   import { e2eRun, e2eStream, expectDone } from "@langgraph/toolkit/e2e";
+ *   import { GraphRegistry } from "@langgraph-toolkit/core";
+ *   import { e2eRun, e2eStream, expectDone } from "@langgraph-toolkit/core/e2e";
  *
  *   const result = await e2eRun("http://localhost:3000/agents/chat/run", {
  *     input: { messages: [{ role: "user", content: "hi" }] },

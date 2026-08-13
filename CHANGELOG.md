@@ -2,9 +2,9 @@
 
 ## 0.1.0
 
-Initial release of the framework-agnostic @langgraph/toolkit monorepo.
+Initial release of the framework-agnostic @langgraph-toolkit/core monorepo.
 
-### Core (@langgraph/toolkit)
+### Core (@langgraph-toolkit/core)
 - `defineGraph()` DSL: state reducers, nodes, edges, conditional routing, converge, safety
 - `compile()` rule enforcement: named graphs/nodes, declared state, first-class edges, deterministic routing, cycle convergence (L1), runaway bounds (L2), verifier anchors (E3)
 - Executor: `run()` / `stream()` SSE, human-in-the-loop (`interruptBefore` + checkpoint + `resumeFrom` + `humanResponse`), cancellation, timeouts
@@ -19,12 +19,12 @@ Initial release of the framework-agnostic @langgraph/toolkit monorepo.
 - `MemoryCheckpointer`
 
 ### Host adapters
-- @langgraph/adapter-struxjs: ServiceProvider, agent scanner, Strux checkpointer, SSE reply writer
-- @langgraph/adapter-express: SSE middleware + router (`/run`, `/stream`)
-- @langgraph/adapter-fastify: plugin + `decorateLangGraph()`
-- @langgraph/adapter-nestjs: DynamicModule + Injectable `LangGraphService`
+- @langgraph-toolkit/adapter-struxjs: ServiceProvider, agent scanner, Strux checkpointer, SSE reply writer
+- @langgraph-toolkit/adapter-express: SSE middleware + router (`/run`, `/stream`)
+- @langgraph-toolkit/adapter-fastify: plugin + `decorateLangGraph()`
+- @langgraph-toolkit/adapter-nestjs: DynamicModule + Injectable `LangGraphService`
 
-### Database adapters (@langgraph/adapter-checkpointers)
+### Database adapters (@langgraph-toolkit/adapter-checkpointers)
 - `SqlCheckpointer` (SQLite/Postgres/MySQL) with `makeSyncSqlDriver`
 - `RedisCheckpointer`, `MongoCheckpointer`
 - Driver injection pattern: zero database dependencies at build time

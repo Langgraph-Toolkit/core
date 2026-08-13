@@ -1,5 +1,5 @@
 {
-  "name": "@langgraph/toolkit",
+  "name": "@langgraph-toolkit/core",
   "version": "0.1.0",
   "description": "Framework-agnostic LangGraph toolkit: defineGraph DSL, compile-time rule enforcement, run, stream, checkpointers and model registry. Works with any backend host.",
   "type": "module",

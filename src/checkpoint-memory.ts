@@ -1,7 +1,7 @@
 /**
  * MemoryCheckpointer: in-memory checkpoint store for dev and tests (Rule P2).
  * Not durable: use SqlCheckpointer/RedisCheckpointer/MongoCheckpointer from
- * @langgraph/adapter-checkpointers in production. Same interface.
+ * @langgraph-toolkit/adapter-checkpointers in production. Same interface.
  */
 import type { Checkpoint, Checkpointer } from "./types.js";
 
