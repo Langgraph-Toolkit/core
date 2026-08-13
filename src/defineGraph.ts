@@ -27,11 +27,14 @@ import type {
   NodeFunction,
   NodeSpec,
   SafetySpec,
+  StateDescriptor,
+  StateField,
+  StateSchema,
   TierAlias,
   ValueSchema,
   VerifySpec,
 } from "./types.js";
-import { GraphDefinitionError } from "./types.js";
+import { GraphDefinitionError, isReducedField } from "./types.js";
 
 /** Options accepted by defineGraph(). See GraphDefinition for semantics. */
 export interface DefineGraphOptions<
@@ -43,7 +46,7 @@ export interface DefineGraphOptions<
   TGlobal extends JsonObject = JsonObject,
 > {
   name: string;
-  state: GraphDefinition<TState, TInput, TOutput, C, TVariables, TGlobal>["state"];
+  state: GraphDefinition<TState, TInput, TOutput, C, TVariables, TGlobal>["state"] | StateDescriptor<TState>;
   stateDefaults?: GraphDefinition<TState, TInput, TOutput, C, TVariables, TGlobal>["stateDefaults"];
   nodes: Record<string, NodeSpec<TState, C, TVariables, TGlobal>>;
   entry?: string;
@@ -92,10 +95,11 @@ export function defineGraph<
   if (Array.isArray(opts.verify) && opts.verify.length > 0 && !opts.nodes[opts.verify[0]]) {
     // best-effort validation; full check happens in compile()
   }
+  const stateDescriptor = isStateDescriptor(opts.state) ? opts.state : undefined;
   return {
     name: opts.name,
-    state: opts.state,
-    stateDefaults: opts.stateDefaults,
+    state: stateDescriptor?.fields ?? (opts.state as StateSchema<TState>),
+    stateDefaults: opts.stateDefaults ?? stateDescriptor?.defaults,
     nodes: opts.nodes,
     entry,
     edges: opts.edges ?? [],
@@ -110,6 +114,20 @@ export function defineGraph<
     variables: opts.variables,
     global: opts.global,
   };
+}
+
+function isStateDescriptor<TState extends object>(value: StateSchema<TState> | StateDescriptor<TState>): value is StateDescriptor<TState> {
+  return typeof value === "object" && value !== null && "__stateDescriptor" in value && value.__stateDescriptor === true;
+}
+
+/** Define a state schema whose field values also become initial state defaults. */
+export function defineState<TState extends object>(fields: StateSchema<TState>): StateDescriptor<TState> {
+  const defaults: Partial<TState> = {};
+  for (const key of Object.keys(fields) as Array<keyof TState>) {
+    const field = fields[key] as StateField<TState[typeof key]>;
+    defaults[key] = isReducedField(field) ? field.default : field;
+  }
+  return { __stateDescriptor: true, fields, defaults };
 }
 
 /**

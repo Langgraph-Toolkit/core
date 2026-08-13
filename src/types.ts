@@ -38,6 +38,12 @@ export function createSchema<T>(name: string, parse: (value: JsonValue) => T): V
 export interface ReducedField<T> { readonly __reduced: true; readonly default: T; readonly reducer: (prev: T, next: T) => T; }
 export type StateField<T> = ReducedField<T> | T;
 export type StateSchema<TState extends object> = { [K in keyof TState]: StateField<TState[K]> };
+/** A state schema carrying the initial values inferred from each field descriptor. */
+export interface StateDescriptor<TState extends object> {
+  readonly __stateDescriptor: true;
+  readonly fields: StateSchema<TState>;
+  readonly defaults: Partial<TState>;
+}
 export interface MessagesField<TMessage extends ChatMessage = ChatMessage> extends ReducedField<readonly TMessage[]> { readonly __messages: true; }
 export function messagesValue<TMessage extends ChatMessage = ChatMessage>(): MessagesField<TMessage> {
   return { __messages: true, __reduced: true, default: [], reducer: (prev, next) => [...prev, ...(Array.isArray(next) ? next : [next])] };

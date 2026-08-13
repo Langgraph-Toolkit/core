@@ -6,6 +6,7 @@ import {
   conditional,
   converge,
   safety,
+  schema,
   compile,
   attachExecutor,
   buildGraph,
@@ -70,6 +71,28 @@ describe("defineGraph + compile (Rule enforcement at compile time)", () => {
     const graph = attachExecutor(compile(def));
     // Node writes counter=1 - declared field, OK
     return expect(graph.run({ messages: [] })).resolves.toBeTruthy();
+  });
+
+  it("uses raw state descriptors as initial values without stateDefaults", async () => {
+    const graph = attachExecutor(compile(defineGraph<{
+      question: string;
+      count: number;
+    }>({
+      name: "raw-state-defaults",
+      state: {
+        question: "",
+        count: reducedValue(0, (previous, next) => previous + next),
+      },
+      nodes: {
+        inspect: node(async (state) => ({ question: state.question, count: 1 })),
+      },
+      entry: "inspect",
+      safety: safety(5),
+    })));
+
+    const result = await graph.run({});
+    expect(result.state.question).toBe("");
+    expect(result.state.count).toBe(1);
   });
 
   it("throws CompileRuleViolationError on unknown entry node", () => {
@@ -177,6 +200,39 @@ describe("executor (run + stream + reducers + interrupt + cancel)", () => {
     }
     expect(types.includes("node_start")).toBe(true);
     expect(types.filter((t) => t === "node_end").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("stream preserves the final tool_end event when a node resolves immediately (Rule P3)", async () => {
+    const echoTool = {
+      name: "echo",
+      description: "Echo a message for stream instrumentation testing.",
+      input: schema<{ readonly message: string }>("EchoInput", (value) => {
+        if (typeof value !== "object" || value === null || Array.isArray(value) || typeof (value as Record<string, unknown>).message !== "string") {
+          throw new Error("message is required");
+        }
+        return { message: (value as { readonly message: string }).message };
+      }),
+      async execute(args: { readonly message: string }) {
+        return { echoed: args.message };
+      },
+    };
+    const graph = attachExecutor(compile(defineGraph<{ readonly messages: unknown[]; readonly done: boolean }>({
+      name: "tool-events",
+      state: { messages: messagesValue(), done: false as never } as never,
+      nodes: {
+        call: node(async (_state, ctx) => {
+          await ctx.callTool(echoTool, { message: "ok" });
+          return { done: true };
+        }),
+      },
+      entry: "call",
+      safety: safety(5),
+    })));
+    const types: string[] = [];
+    for await (const event of graph.stream({ messages: [] })) types.push(event.type);
+    expect(types).toContain("tool_start");
+    expect(types).toContain("tool_end");
+    expect(types.indexOf("tool_end")).toBeLessThan(types.indexOf("node_end"));
   });
 
   it("interruptBefore pauses execution and checkpoint persists (Rule P5)", async () => {

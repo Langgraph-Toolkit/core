@@ -131,8 +131,10 @@ function applyDefaults<TState extends object, TInput extends object = Partial<TS
           ? stateDefaults[key]
           : casted.default;
       if (reducedDefault !== undefined) defaults[key] = reducedDefault;
-    } else if (stateDefaults?.[key] !== undefined) {
-      defaults[key] = stateDefaults[key];
+    } else {
+      // Raw state descriptors are the zero-config initial values. An explicit
+      // stateDefaults entry remains an override for backwards compatibility.
+      defaults[key] = stateDefaults?.[key] ?? shape;
     }
   }
   // Allow input to carry raw initial values for reduced fields (unwrap handled on first merge).
@@ -622,7 +624,12 @@ export async function* streamEvents<TState extends object, TInput extends object
         actor: opts.actor,
       };
 
-      let nextEvent = eventQueue.next().then((result) => ({ kind: "event" as const, result }));
+      let settledEvent: QueueResult<StepEvent<TState, C>> | undefined;
+      const readNextEvent = () => eventQueue.next().then((result) => {
+        settledEvent = result;
+        return { kind: "event" as const, result };
+      });
+      let nextEvent = readNextEvent();
       const nodeExecution = (async (): Promise<NodeExecutionOutcome<TState, C>> => {
         try {
           const result = nodeSpec.fn(state, ctx);
@@ -645,12 +652,22 @@ export async function* streamEvents<TState extends object, TInput extends object
       while (outcome === undefined) {
         const winner = await Promise.race([nodeResult, nextEvent]);
         if (winner.kind === "outcome") {
+          // A node may resolve immediately after its final callback event is
+          // pushed. Give that already-resolved queue waiter one microtask to
+          // settle before closing the queue, otherwise the final event can be
+          // consumed by Promise.race but never yielded to the stream caller.
+          await Promise.resolve();
+          if (settledEvent?.kind === "value") {
+            yield settledEvent.value;
+            settledEvent = undefined;
+          }
           outcome = winner.result;
           break;
         }
         if (winner.result.kind === "value") {
           yield winner.result.value;
-          nextEvent = eventQueue.next().then((result) => ({ kind: "event" as const, result }));
+          settledEvent = undefined;
+          nextEvent = readNextEvent();
         }
       }
 

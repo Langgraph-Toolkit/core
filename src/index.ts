@@ -17,7 +17,7 @@
  */
 
 // DSL
-export { defineGraph, node, edge, conditional, converge, safety, tier, stepLabel, schema, gate, tool, intent, intentAnalyzer } from "./defineGraph.js";
+export { defineGraph, defineState, node, edge, conditional, converge, safety, tier, stepLabel, schema, gate, tool, intent, intentAnalyzer } from "./defineGraph.js";
 
 // Compiler + executor
 export { compile } from "./compile.js";
@@ -101,6 +101,7 @@ export {
 export type {
   GraphDefinition,
   CompiledGraph,
+  StateDescriptor,
   NodeFunction,
   NodeSpec,
   EdgeSpec,
