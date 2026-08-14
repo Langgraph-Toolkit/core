@@ -39,5 +39,9 @@
     "@types/node": "^26.2.0",
     "typescript": "^5.4.5",
     "vitest": "^1.6.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Langgraph-Toolkit/core.git"
   }
 }
