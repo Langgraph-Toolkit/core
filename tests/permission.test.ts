@@ -4,21 +4,88 @@ import {
   node,
   edge,
   safety,
-  GraphRegistry,
-  ToolkitModelRegistry,
-  MockProvider,
-  rolePolicy,
-  combinePolicies,
-  planTierResolver,
-  withTokenBudget,
-  resetTokenLedger,
-  testEdgeRisk,
-  e2eActor,
-  e2eScenarioResume,
-  MemoryCheckpointer,
   PermissionDeniedError,
   TokenBudgetExceededError,
 } from "../src/index.js";
+import {
+  GraphRegistry,
+  withTokenBudget,
+  resetTokenLedger,
+} from "../src/runtime-barrel.js";
+import { testEdgeRisk, e2eActor, e2eScenarioResume, MemoryCheckpointer } from "../src/testing-barrel.js";
+import type {
+  Actor,
+  LLMProvider,
+  LLMProviderConfig,
+  ModelRegistry,
+  RunPolicy,
+  TierResolver,
+} from "../src/types.js";
+
+function rolePolicy(allowedByGraph: Record<string, string[]>): RunPolicy {
+  return (actor, graphName) => {
+    const roles = actor.roles ?? [];
+    const allowed = allowedByGraph[graphName] ?? [];
+    return allowed.length > 0 && roles.some((role) => allowed.includes(role)) ? "allow" : "deny";
+  };
+}
+
+function combinePolicies(...policies: RunPolicy[]): RunPolicy {
+  return async (actor, graphName, options) => {
+    let interrupted = false;
+    for (const policy of policies) {
+      const decision = await policy(actor, graphName, options);
+      if (decision === "deny") return "deny";
+      if (decision === "interrupt") interrupted = true;
+    }
+    return interrupted ? "interrupt" : "allow";
+  };
+}
+
+function planTierResolver(planMap: Record<string, Record<string, string>>): TierResolver {
+  return (actor, binding) => {
+    const plan = typeof actor.claims?.plan === "string" ? actor.claims.plan : "free";
+    return planMap[plan]?.[binding.tier] ?? binding.tier;
+  };
+}
+
+class TestProvider implements LLMProvider {
+  readonly name: string;
+
+  constructor(private readonly config: LLMProviderConfig) {
+    this.name = `mock:${config.model}`;
+  }
+
+  async chat(): Promise<{ readonly content: string; readonly usage: { readonly inputTokens: number; readonly outputTokens: number } }> {
+    return { content: `mock:${this.config.model}`, usage: { inputTokens: 0, outputTokens: 0 } };
+  }
+
+  async *stream(): AsyncIterable<string> {
+    yield `mock:${this.config.model}`;
+  }
+}
+
+class TestModelRegistry implements ModelRegistry {
+  private readonly providers = new Map<string, LLMProvider>();
+
+  constructor(configs: Readonly<Record<string, LLMProviderConfig>>) {
+    this.reconfigure(configs, (config) => new TestProvider(config));
+  }
+
+  tier(alias: string): LLMProvider {
+    const provider = this.providers.get(alias);
+    if (!provider) throw new Error(`Missing test tier: ${alias}`);
+    return provider;
+  }
+
+  reconfigure(
+    configs: Readonly<Record<string, LLMProviderConfig>>,
+    factory: (config: LLMProviderConfig) => LLMProvider,
+  ): void {
+    this.providers.clear();
+    for (const [alias, config] of Object.entries(configs)) this.providers.set(alias, factory(config));
+  }
+}
 
 // ---------- shared graph fixture ----------
 
@@ -145,11 +212,9 @@ describe("RunPolicy (Rule A1)", () => {
 
 describe("TierResolver (Rule A2)", () => {
   it("downgrades a free actor to the cheap tier", async () => {
-    const registry = new ToolkitModelRegistry({
-      tiers: {
-        cheap: { driver: "mock", model: "m-cheap" },
-        strong: { driver: "mock", model: "m-strong" },
-      },
+    const registry = new TestModelRegistry({
+      cheap: { driver: "mock", model: "m-cheap" },
+      strong: { driver: "mock", model: "m-strong" },
     });
     const resolved: string[] = [];
     const tierResolver = (actor: { claims?: Record<string, unknown> }, binding: { tier: string }) => {
@@ -213,7 +278,7 @@ describe("TokenBudget (Rule A3)", () => {
   });
 
   it("passes when usage fits under the limit and accumulates", async () => {
-    const provider = new MockProvider({ driver: "mock", model: "m2" });
+    const provider = new TestProvider({ driver: "mock", model: "m2" });
     const limited = withTokenBudget(provider, {
       perTier: { __default__: { limit: 100 } },
     }, e2eActor("u12"));
@@ -224,7 +289,7 @@ describe("TokenBudget (Rule A3)", () => {
   });
 
   it("is a no-op without an actor", async () => {
-    const provider = new MockProvider({ driver: "mock", model: "m3" });
+    const provider = new TestProvider({ driver: "mock", model: "m3" });
     const limited = withTokenBudget(provider, { perTier: {} }, undefined);
     expect(limited).toBe(provider);
   });

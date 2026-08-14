@@ -1,8 +1,10 @@
 import type {
   ChatMessage,
+  ModelToolCall,
   GraphContracts,
   DefaultGraphContracts,
   NodeFunction,
+  NodeContext,
 } from "./types.js";
 
 /** Options for a model-backed node that streams public answer events. */
@@ -56,6 +58,15 @@ export function streamChatNode<
             data: { value: chunk.value, index: reasoningIndex },
           });
           reasoningIndex += 1;
+        } else if (chunk.type === "tool_call") {
+          ctx.emit({
+            graph: ctx.graph,
+            threadId: ctx.threadId,
+            runId: ctx.runId,
+            type: "model_tool_call",
+            ts: Date.now(),
+            data: chunk.value,
+          });
         } else if (chunk.type === "usage") {
           ctx.emit({
             graph: ctx.graph,
@@ -80,6 +91,9 @@ export function streamChatNode<
     }
 
     const result = await ctx.model.chat(messages);
+    for (const toolCall of result.toolCalls ?? []) {
+      emitToolCall(ctx, toolCall);
+    }
     const finalAnswer = options.toAnswer(result.content);
     ctx.emit({
       graph: ctx.graph,
@@ -91,4 +105,15 @@ export function streamChatNode<
     });
     return options.update(state, result.content);
   };
+}
+
+function emitToolCall<TState extends object, C extends GraphContracts>(ctx: NodeContext<TState, C>, call: ModelToolCall): void {
+  ctx.emit({
+    graph: ctx.graph,
+    threadId: ctx.threadId,
+    runId: ctx.runId,
+    type: "model_tool_call",
+    ts: Date.now(),
+    data: { id: call.id, index: 0, name: call.name, arguments: JSON.stringify(call.arguments) },
+  });
 }

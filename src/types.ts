@@ -171,8 +171,10 @@ export interface NodeContext<TState extends object = object, C extends GraphCont
   readonly emitError: (message: string, cause?: Error) => void;
   readonly log: (event: JsonObject) => void;
   readonly think: (value: C["thinking"], label?: string) => void;
-  readonly interrupt: (request: InterruptRequest<C["interrupt"]>) => never;
-  readonly ask: (request: InterruptRequest<C["interrupt"]>) => never;
+  /** Request a pause; the default runtime throws internally after recording the request. */
+  readonly interrupt: (request: InterruptRequest<C["interrupt"]>) => void;
+  /** Request a human answer; the default runtime throws internally after recording the request. */
+  readonly ask: (request: InterruptRequest<C["interrupt"]>) => void;
   readonly callTool: <TArgs extends object, TResult extends JsonValue>(tool: ToolDefinition<TArgs, TResult>, args: TArgs) => Promise<TResult>;
   readonly detectIntent: <TInput extends object, TIntent extends string>(classifier: IntentClassifier<TInput, TIntent>, input: TInput) => Promise<TIntent>;
   readonly analyzeIntent: <TInput extends object, TIntent extends string, TDetails extends JsonObject>(analyzer: IntentAnalyzer<TInput, TIntent, TDetails>, input: TInput) => Promise<IntentClassification<TIntent, TDetails>>;
@@ -294,6 +296,7 @@ export type StepEvent<TState extends object = object, C extends GraphContracts =
   | (StepEventBase & { readonly type: "thinking"; readonly data: { readonly value: C["thinking"] } })
   | (StepEventBase & { readonly type: "token"; readonly data: { readonly value: string; readonly index: number } })
   | (StepEventBase & { readonly type: "reasoning"; readonly data: { readonly value: string; readonly index: number } })
+  | (StepEventBase & { readonly type: "model_tool_call"; readonly data: { readonly id?: string; readonly index: number; readonly name?: string; readonly arguments: string } })
   | (StepEventBase & { readonly type: "usage"; readonly data: { readonly tier: string; readonly value: TokenUsage } })
   | (StepEventBase & { readonly type: "intent"; readonly data: { readonly name: string; readonly value: C["intent"]; readonly analysis?: IntentAnalysis } })
   | (StepEventBase & { readonly type: "answer"; readonly data: { readonly value: C["answer"] } })
@@ -308,15 +311,34 @@ export type StepEvent<TState extends object = object, C extends GraphContracts =
 export interface CancellationSource { cancel(): void; isCancelled(): boolean; }
 export function createCancellationSource(): CancellationSource { let cancelled = false; return { cancel: () => { cancelled = true; }, isCancelled: () => cancelled }; }
 
-export interface ChatMessage { readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string; }
+export interface ModelToolCall { readonly id: string; readonly name: string; readonly arguments: JsonObject; }
+export interface ModelToolSpec { readonly name: string; readonly description: string; readonly parameters: JsonObject; }
+export type ModelToolChoice = "auto" | "none" | "required" | { readonly name: string };
+export interface ResponseFormat { readonly type: "text" | "json_object" | "json_schema"; readonly name?: string; readonly schema?: JsonObject; readonly strict?: boolean; }
+export interface ChatMessage {
+  readonly role: "system" | "user" | "assistant" | "tool";
+  readonly content: string;
+  readonly name?: string;
+  readonly toolCallId?: string;
+  readonly toolCalls?: readonly ModelToolCall[];
+}
 export interface TokenUsage { readonly inputTokens: number; readonly outputTokens: number; }
 export type ChatStreamChunk =
   | { readonly type: "token"; readonly value: string }
   | { readonly type: "reasoning"; readonly value: string }
+  | { readonly type: "tool_call"; readonly value: { readonly id?: string; readonly index: number; readonly name?: string; readonly arguments: string } }
   | { readonly type: "usage"; readonly value: TokenUsage };
-export interface ChatStreamOptions { readonly signal?: AbortSignal; }
-export interface ChatResult { readonly content: string; readonly usage?: TokenUsage; readonly finishReason?: string; readonly raw?: JsonValue; }
 export type ReasoningEffort = "none" | "low" | "medium" | "high";
+export interface ChatStreamOptions {
+  readonly signal?: AbortSignal;
+  readonly tools?: readonly ModelToolSpec[];
+  readonly toolChoice?: ModelToolChoice;
+  readonly responseFormat?: ResponseFormat;
+  readonly temperature?: number;
+  readonly maxTokens?: number;
+  readonly reasoningEffort?: ReasoningEffort;
+}
+export interface ChatResult { readonly content: string; readonly usage?: TokenUsage; readonly finishReason?: string; readonly toolCalls?: readonly ModelToolCall[]; readonly raw?: JsonValue; }
 export interface LLMProviderConfig { readonly driver: "openai" | "anthropic" | "huggingface" | "openai-compatible" | "mock"; readonly model: string; readonly apiKey?: string; readonly baseURL?: string; readonly provider?: string; readonly maxTokens?: number; readonly temperature?: number; readonly reasoningEffort?: ReasoningEffort; readonly mockResponse?: string; readonly adapterRepo?: string; }
 export interface LLMProvider {
   readonly name: string;

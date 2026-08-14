@@ -55,12 +55,12 @@ export async function dispatchToQueue<TState extends object>(
 }
 
 /**
- * Create a worker handler: feed it jobs from your queue consumer
+ * Create a graph worker handler: feed it jobs from your queue consumer
  * (BullMQ process, Strux Queue listener...) to execute them via the
  * registry. One worker per host process; scale horizontally by running
  * more processes.
  */
-export function createGraphRunnerWorker<TState extends object>(
+export function createGraphWorker<TState extends object>(
   registry: GraphRegistry,
 ): (job: QueuedJob<TState>) => Promise<void> {
   return async (job) => {

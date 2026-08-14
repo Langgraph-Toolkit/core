@@ -1,35 +1,25 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	defineGraph,
 	defineState,
   node,
   edge,
   conditional,
-  converge,
-  safety,
-  schema,
-  compile,
-  attachExecutor,
+	  converge,
+	safety,
+	schema,
 	buildGraph,
-  GraphRegistry,
-  MemoryCheckpointer,
-  messagesValue,
-  reducedValue,
-  ToolkitModelRegistry,
-  MockProvider,
-  OpenAiCompatibleProvider,
-  HuggingFaceProvider,
-  codeAnchor,
-  runVerifiers,
-  dispatchToQueue,
-  registerQueueAdapter,
-  hasNonLlmAnchor,
-  isReducedField,
-  createCancellationSource,
+	messagesValue,
+	reducedValue,
+	isReducedField,
+	createCancellationSource,
   CompileRuleViolationError,
   GraphRuntimeError,
   SafetyLimitExceededError,
-	} from "../src/index.js";
+		} from "../src/index.js";
+import { compile, attachExecutor, GraphRegistry } from "../src/runtime-barrel.js";
+import { dispatchToQueue, registerQueueAdapter } from "../src/queue-barrel.js";
+import { MemoryCheckpointer, codeAnchor, runVerifiers, hasAnchor } from "../src/testing-barrel.js";
 
 describe("buildGraph zero-config entrypoint", () => {
 	it("compiles and attaches a runnable graph in one call", async () => {
@@ -376,7 +366,7 @@ describe("verifiers (Rule E3: non-LLM anchor required)", () => {
     const result = await compiled.run({ messages: [] });
     const panel = await runVerifiers(compiled, result.state, { requireNonLlmAnchor: true });
     expect(panel.pass).toBe(true);
-    expect(hasNonLlmAnchor(panel)).toBe(true);
+    expect(hasAnchor(panel)).toBe(true);
   });
 
   it("fails when the panel has no non-LLM anchor", async () => {
@@ -419,37 +409,6 @@ describe("GraphRegistry", () => {
   it("errors on running unregistered graph", async () => {
     const registry = new GraphRegistry();
     await expect(registry.run("missing", {})).rejects.toThrow(GraphRuntimeError);
-  });
-});
-
-describe("model registry + providers (Rule T3: tier alias)", () => {
-  it("resolves tiers and records usage", async () => {
-    const registry = new ToolkitModelRegistry({
-      tiers: {
-        strong: { driver: "mock", model: "m-strong" },
-        cheap: { driver: "mock", model: "m-cheap" },
-      },
-    });
-    const provider = registry.tier("strong");
-    const res = await provider.chat([{ role: "user", content: "hi" }]);
-    expect(res.content).toContain("m-strong");
-    registry.recordUsage("strong", { input: 10, output: 5 });
-    expect(registry.tokenUsage.get("strong")).toEqual({ input: 10, output: 5 });
-  });
-
-  it("reconfigures a tier without touching graph code", () => {
-    const registry = new ToolkitModelRegistry({
-      tiers: { strong: { driver: "mock", model: "m1" } },
-    });
-    registry.reconfigure({ strong: { driver: "mock", model: "m2" } });
-    expect(registry.tier("strong").name).toBe("mock:m2");
-  });
-
-  it("exposes OpenAI-compatible and HuggingFace provider classes", () => {
-    expect(() => new OpenAiCompatibleProvider({ baseUrl: "http://x", model: "m" })).not.toThrow();
-    expect(
-      () => new HuggingFaceProvider({ model: "mistralai/Mistral-7B-Instruct-v0.3", provider: "auto" }),
-    ).not.toThrow();
   });
 });
 

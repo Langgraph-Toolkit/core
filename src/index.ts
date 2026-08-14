@@ -1,91 +1,41 @@
 /**
  * @langgraph-toolkit/core
  *
- * Framework-agnostic LangGraph toolkit. Define graphs once, run them on
- * Express, Fastify, NestJS, StruxJS, or a plain queue worker with zero
- * changes to the graph code.
+ * The framework-agnostic graph vocabulary. This root barrel is deliberately
+ * small: optional runtime registries, queues, providers, policies, and test
+ * harnesses live behind explicit subpaths or in Community packages.
  *
- * Quick start:
- *
- *   import { defineGraph, buildGraph,
- *            messagesValue, safety, MemoryCheckpointer, ToolkitModelRegistry }
- *     from "@langgraph-toolkit/core";
- *
- *   const def = defineGraph({ name, state, nodes, entry, edges, safety, ... });
- *   const graph = buildGraph(def);
- *   await graph.run(input, { threadId: "t1", checkpoint: new MemoryCheckpointer() });
+ * @example
+ * ```ts
+ * import { buildGraph, defineGraph, edge, node, streamEvents } from "@langgraph-toolkit/core";
+ * ```
  */
 
-// DSL
-export { defineGraph, defineState, node, edge, conditional, converge, safety, tier, stepLabel, schema, gate, tool, intent, intentAnalyzer } from "./defineGraph.js";
-
-// Compiler + executor
-export { compile } from "./compile.js";
-export { attachExecutor, buildGraph, execute, streamEvents } from "./executor.js";
-export { streamChatNode } from "./chat-node.js";
-
-// Registry (used by host adapters)
-export { GraphRegistry } from "./registry.js";
-export { ToolkitRuntime, createToolkitRuntime } from "./runtime.js";
-export type { ToolkitRuntimeConfigurator, ToolkitRuntimeOptions } from "./runtime.js";
-
-// State values / reducers
-export { messagesValue, reducedValue, isReducedField } from "./types.js";
-
-// Checkpointers
-export { MemoryCheckpointer } from "./checkpoint-memory.js";
-
-// Model registry + providers
+/** Define a typed graph workflow. */
 export {
-  ToolkitModelRegistry,
-  defaultProviderFactory,
-  OpenAiCompatibleProvider,
-  HuggingFaceProvider,
-  MockProvider,
-} from "./providers.js";
+  defineGraph,
+  defineState,
+  node,
+  edge,
+  conditional,
+  converge,
+  safety,
+  tier,
+  stepLabel,
+  schema,
+  gate,
+  tool,
+  intent,
+  intentAnalyzer,
+} from "./defineGraph.js";
 
-// Policy helpers (Rules A1/A2/A4)
-export { rolePolicy, combinePolicies, planTierResolver } from "./providers.js";
-export { withTokenBudget, resetTokenLedger } from "./executor.js";
+/** Compile and attach the default graph executor in one call. */
+export { buildGraph, streamEvents } from "./executor.js";
 
-// Risk harness: probe graphs for edge risk before production
-export { testEdgeRisk } from "./risk.js";
-export type { RiskProbeOptions, RiskProbeResult, RiskViolation } from "./risk.js";
+/** Typed state helpers and cooperative cancellation. */
+export { messagesValue, reducedValue, isReducedField, createCancellationSource } from "./types.js";
 
-// Verification (Rule E3)
-export {
-  runVerifiers,
-  verifyOrThrow,
-  validateVerifiers,
-  hasNonLlmAnchor,
-  codeAnchor,
-  testAnchor,
-} from "./verify.js";
-
-// Queue dispatch (host-agnostic)
-export {
-  dispatchToQueue,
-  registerQueueAdapter,
-  getQueueAdapter,
-  createGraphRunnerWorker,
-} from "./queue.js";
-
-// Cancellation (Rule L2)
-export { createCancellationSource } from "./types.js";
-
-// E2E testing harness for contributors
-export {
-  e2eRun,
-  e2eStream,
-  e2eActor,
-  e2eScenarioResume,
-  expectDone,
-  expectInterrupted,
-  expectTerminal,
-} from "./e2e.js";
-export type { E2eRunRequest, E2eRunResponse, ParsedSseEvent } from "./e2e.js";
-
-// Errors
+/** Stable graph and execution errors. */
 export {
   ToolkitError,
   GraphDefinitionError,
@@ -97,14 +47,22 @@ export {
   TokenBudgetExceededError,
 } from "./types.js";
 
-// Types (re-export for consumers)
+/** Public graph, state, model, tool, interrupt, and stream contracts. */
 export type {
   GraphDefinition,
   CompiledGraph,
   NodeLike,
-  StateDescriptor,
   NodeFunction,
   NodeSpec,
+  NodeContext,
+  StateDescriptor,
+  StateSchema,
+  StateField,
+  StateFieldInput,
+  ReducedField,
+  MessagesField,
+  StateOf,
+  InputOf,
   EdgeSpec,
   ConditionalEdgeSpec,
   ConditionalRouteFn,
@@ -112,47 +70,8 @@ export type {
   SafetySpec,
   InterruptSpec,
   InterruptMode,
-  RunOptions,
-  RunResult,
-  StepEvent,
-  Checkpoint,
-  Checkpointer,
-  CancellationSource,
-  ChatMessage,
-  ChatResult,
-  LLMProvider,
-  LLMProviderConfig,
-  LLMSession,
-  ModelRegistry,
-  VerifierResult,
-  VerifierFn,
-  VerifySpec,
-  NodeContext,
-  IntentAnalyzer,
-  IntentClassification,
-  IntentAnalysis,
-  QueuedJob,
-  QueueAdapter,
-  ReducedField,
-  MessagesField,
-  TierAlias,
-  Actor,
-  NodeRiskClass,
-  PolicyDecision,
-  RunPolicy,
-  TierResolver,
-  TokenBudget,
-  TokenBudgetSpec,
-  JsonPrimitive,
-  JsonValue,
-  JsonObject,
-  ValueSchema,
-  StateSchema,
-  StateField,
-  GraphContracts,
-  DefaultGraphContracts,
-  GraphRuntimeOptions,
-  GraphSchemas,
+  InterruptRequest,
+  PendingInterrupt,
   Gate,
   GateDecision,
   GateContext,
@@ -160,11 +79,37 @@ export type {
   ToolContext,
   IntentClassifier,
   IntentContext,
+  IntentAnalyzer,
+  IntentClassification,
+  IntentAnalysis,
   IntentSpec,
-  InterruptRequest,
-  PendingInterrupt,
   StepDescriptor,
-  StateOf,
-  InputOf,
+  GraphContracts,
+  DefaultGraphContracts,
+  GraphSchemas,
+  RunOptions,
+  RunResult,
+  StepEvent,
+  Checkpoint,
+  Checkpointer,
+  CancellationSource,
+  Actor,
+  JsonPrimitive,
+  JsonValue,
+  JsonObject,
+  ValueSchema,
+  ChatMessage,
+  ChatResult,
+  ChatStreamChunk,
+  ChatStreamOptions,
+  LLMProvider,
+  LLMSession,
+  LLMProviderConfig,
+  ModelRegistry,
+  ModelToolCall,
+  ModelToolSpec,
+  ModelToolChoice,
+  ResponseFormat,
+  TokenUsage,
+  ReasoningEffort,
 } from "./types.js";
-export type { StreamChatNodeOptions } from "./chat-node.js";

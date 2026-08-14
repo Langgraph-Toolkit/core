@@ -59,10 +59,10 @@ const answer = async (current: ChatState): Promise<Partial<ChatState>> => ({
 });
 ```
 
-For model-backed nodes, `streamChatNode` owns the repeated thinking, token, reasoning, usage, cancellation, and final-answer event handling. Use a plain `answer` function only when the graph deliberately needs custom model orchestration.
+For model-backed nodes, `streamChatNode` owns the repeated thinking, token, reasoning, usage, cancellation, and final-answer event handling. It is an optional runtime helper, so import it from `@langgraph-toolkit/core/runtime`. Use a plain `answer` function only when the graph deliberately needs custom model orchestration.
 
 ```ts
-import { streamChatNode } from "@langgraph-toolkit/core";
+import { streamChatNode } from "@langgraph-toolkit/core/runtime";
 
 const answer = streamChatNode({
   system: "Answer only from the supplied context.",
@@ -96,10 +96,6 @@ const graph = buildGraph(
       answer,
     },
     runtime: {
-      checkpoint: checkpointStore,
-      actor: actorFromRequest,
-      policy: databaseReaderPolicy,
-      tokenBudget: { limit: 20_000, windowMs: 3_600_000 },
       variables: { source: "database-chat" },
     },
   }),
@@ -162,7 +158,8 @@ This boundary is the main portability guarantee. A host can change without movin
 | Area | Main API | Why it exists |
 |---|---|---|
 | State | `defineState`, `reducedValue`, `messagesValue` | Infer state shape and merge behavior |
-| Graph | `defineGraph`, `buildGraph`, `compile` | Define, validate, and create a runnable graph |
+| Graph | `defineGraph`, `buildGraph` | Define, validate, and create a runnable graph |
+| Runtime control | `compile`, `GraphRegistry`, `createToolkitRuntime` from `@langgraph-toolkit/core/runtime` | Opt into explicit compilation, registries, and runtime composition |
 | Execution | `graph.run`, `graph.stream` | Run or stream typed step, tool, token, thinking, and interrupt events |
 | Control flow | `edge`, `conditional`, `gate`, `interruptBefore` | Express branches, approvals, and human-in-the-loop behavior |
 | Safety | actors, policies, tiers, token budgets, risk harness | Bound permission and cost decisions |

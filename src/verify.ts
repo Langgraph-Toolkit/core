@@ -25,7 +25,7 @@ export interface RunVerifierOptions {
 const NON_LLM_ANCHORS = ["code", "test", "http", "db"] as const;
 
 /** True when the result carries at least one code/test/http/db anchor (Rule E3). */
-export function hasNonLlmAnchor(result: VerifierResult): boolean {
+export function hasAnchor(result: VerifierResult): boolean {
   return result.anchors.some((a) => NON_LLM_ANCHORS.includes(a as (typeof NON_LLM_ANCHORS)[number]));
 }
 
@@ -72,7 +72,7 @@ export async function runVerifiers<TState extends object>(
     reason: failing.length > 0 ? failing.map((r: VerifierResult) => r.reason).filter(Boolean).join("; ") : undefined,
     anchors: Array.from(new Set(results.flatMap((r: VerifierResult) => r.anchors))),
   } satisfies VerifierResult;
-  if (opts.requireNonLlmAnchor && !hasNonLlmAnchor(panel)) {
+  if (opts.requireNonLlmAnchor && !hasAnchor(panel)) {
     return {
       pass: false,
       reason: "Verifier panel has no non-LLM anchor (Rule E3): wire at least one code/test/http/db verifier.",
