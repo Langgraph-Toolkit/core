@@ -14,6 +14,7 @@ import type {
   GraphContracts,
   GraphDefinition,
   GraphSchemas,
+  GraphRuntimeOptions,
   Gate,
   GateContext,
   GateDecision,
@@ -25,11 +26,13 @@ import type {
   ToolDefinition,
   JsonObject,
   NodeFunction,
+  NodeLike,
   NodeSpec,
   SafetySpec,
   StateDescriptor,
   StateField,
   StateSchema,
+  StateFieldInput,
   TierAlias,
   ValueSchema,
   VerifySpec,
@@ -47,8 +50,9 @@ export interface DefineGraphOptions<
 > {
   name: string;
   state: GraphDefinition<TState, TInput, TOutput, C, TVariables, TGlobal>["state"] | StateDescriptor<TState>;
+  /** @deprecated Prefer initial values declared through `defineState`. */
   stateDefaults?: GraphDefinition<TState, TInput, TOutput, C, TVariables, TGlobal>["stateDefaults"];
-  nodes: Record<string, NodeSpec<TState, C, TVariables, TGlobal>>;
+  nodes: Record<string, NodeLike<TState, C, TVariables, TGlobal>>;
   entry?: string;
   edges?: GraphDefinition<TState, TInput, TOutput, C, TVariables, TGlobal>["edges"];
   /** Optional: verifier gate nodes (Rule E3). Accepts either a node list
@@ -64,6 +68,8 @@ export interface DefineGraphOptions<
   schemas?: GraphSchemas<TInput, TOutput, C>;
   variables?: Partial<TVariables>;
   global?: Partial<TGlobal>;
+  /** Defaults inherited by every graph run. */
+  runtime?: GraphRuntimeOptions<TVariables, TGlobal>;
 }
 
 /**
@@ -100,9 +106,9 @@ export function defineGraph<
     name: opts.name,
     state: stateDescriptor?.fields ?? (opts.state as StateSchema<TState>),
     stateDefaults: opts.stateDefaults ?? stateDescriptor?.defaults,
-    nodes: opts.nodes,
+    nodes: normalizeNodes(opts.nodes),
     entry,
-    edges: opts.edges ?? [],
+    edges: opts.edges ?? linearEdges(Object.keys(opts.nodes)),
     verify: Array.isArray(opts.verify)
       ? { nodes: opts.verify, fns: opts.verifierFns ?? [] }
       : (opts.verify as GraphDefinition<TState, TInput, TOutput, C, TVariables, TGlobal>["verify"]),
@@ -113,7 +119,23 @@ export function defineGraph<
     schemas: opts.schemas,
     variables: opts.variables,
     global: opts.global,
+    runtime: opts.runtime,
   };
+}
+
+function normalizeNodes<
+  TState extends object,
+  C extends GraphContracts,
+  TVariables extends JsonObject,
+  TGlobal extends JsonObject,
+>(nodes: Record<string, NodeLike<TState, C, TVariables, TGlobal>>): Record<string, NodeSpec<TState, C, TVariables, TGlobal>> {
+  return Object.fromEntries(
+    Object.entries(nodes).map(([name, value]) => [name, typeof value === "function" ? { fn: value } : value]),
+  ) as Record<string, NodeSpec<TState, C, TVariables, TGlobal>>;
+}
+
+function linearEdges(names: readonly string[]): readonly { readonly from: string; readonly to: string }[] {
+  return names.map((name, index) => ({ from: name, to: names[index + 1] ?? "END" }));
 }
 
 function isStateDescriptor<TState extends object>(value: StateSchema<TState> | StateDescriptor<TState>): value is StateDescriptor<TState> {
@@ -121,11 +143,11 @@ function isStateDescriptor<TState extends object>(value: StateSchema<TState> | S
 }
 
 /** Define a state schema whose field values also become initial state defaults. */
-export function defineState<TState extends object>(fields: StateSchema<TState>): StateDescriptor<TState> {
-  const defaults: Partial<TState> = {};
-  for (const key of Object.keys(fields) as Array<keyof TState>) {
-    const field = fields[key] as StateField<TState[typeof key]>;
-    defaults[key] = isReducedField(field) ? field.default : field;
+export function defineState<TFields extends Record<string, StateFieldInput>>(fields: TFields): import("./types.js").InferredStateDescriptor<TFields> {
+  const defaults: Partial<import("./types.js").InferState<TFields>> = {};
+  for (const key of Object.keys(fields) as Array<keyof TFields>) {
+    const field = fields[key];
+    defaults[key] = (isReducedField(field) ? field.default : field) as import("./types.js").InferState<TFields>[typeof key];
   }
   return { __stateDescriptor: true, fields, defaults };
 }

@@ -44,6 +44,18 @@ export interface StateDescriptor<TState extends object> {
   readonly fields: StateSchema<TState>;
   readonly defaults: Partial<TState>;
 }
+/** The runtime value represented by a state field descriptor. */
+export type StateValue<TField> = TField extends ReducedField<infer TValue> ? TValue : TField;
+/** Infer the state value object from a field descriptor map. */
+export type InferState<TFields> = {
+  [K in keyof TFields]: StateValue<TFields[K]>;
+};
+/** Serializable field values accepted by the inference-first state DSL. */
+export type StateFieldInput = object | string | number | boolean | null;
+/** A state descriptor map with its inferred state value type attached. */
+export type InferredStateDescriptor<TFields extends Record<string, StateFieldInput>> = Omit<StateDescriptor<InferState<TFields>>, "fields"> & {
+  readonly fields: TFields;
+};
 export interface MessagesField<TMessage extends ChatMessage = ChatMessage> extends ReducedField<readonly TMessage[]> { readonly __messages: true; }
 export function messagesValue<TMessage extends ChatMessage = ChatMessage>(): MessagesField<TMessage> {
   return { __messages: true, __reduced: true, default: [], reducer: (prev, next) => [...prev, ...(Array.isArray(next) ? next : [next])] };
@@ -170,6 +182,10 @@ export interface NodeSpec<TState extends object, C extends GraphContracts = Defa
   readonly tools?: readonly ToolDefinition<object, C["toolCall"]>[];
   readonly intent?: IntentSpec<C["intent"]>;
 }
+/** A node may be a plain function in zero-config graphs or a configured NodeSpec. */
+export type NodeLike<TState extends object, C extends GraphContracts = DefaultGraphContracts, TVariables extends JsonObject = JsonObject, TGlobal extends JsonObject = JsonObject> =
+  | NodeSpec<TState, C, TVariables, TGlobal>
+  | NodeFunction<TState, C, TVariables, TGlobal>;
 export type RouteDecision<TState extends object> = string | string[];
 export type ConditionalRouteFn<TState extends object> = (state: TState) => RouteDecision<TState>;
 export interface EdgeSpec<TState extends object = object> { readonly from: string; readonly to: string; readonly label?: string; }
@@ -180,9 +196,22 @@ export interface SafetySpec { readonly recursionLimit: number; readonly timeoutM
 export type InterruptMode = "before" | "after";
 export interface InterruptSpec<TInterrupt extends JsonValue = JsonValue> { readonly nodes: readonly string[]; readonly mode?: InterruptMode; readonly request?: InterruptRequest<TInterrupt>; }
 
+/** Defaults inherited by every run of a compiled graph. */
+export interface GraphRuntimeOptions<TVariables extends JsonObject = JsonObject, TGlobal extends JsonObject = JsonObject> {
+  readonly checkpoint?: Checkpointer;
+  readonly modelRegistry?: ModelRegistry;
+  readonly actor?: Actor;
+  readonly policy?: RunPolicy;
+  readonly tierResolver?: TierResolver;
+  readonly tokenBudget?: TokenBudget;
+  readonly variables?: Partial<TVariables>;
+  readonly global?: Partial<TGlobal>;
+}
+
 export interface GraphDefinition<TState extends object, TInput extends object = Partial<TState>, TOutput extends object = TState, C extends GraphContracts = DefaultGraphContracts, TVariables extends JsonObject = JsonObject, TGlobal extends JsonObject = JsonObject> {
   readonly name: string;
   readonly state: StateSchema<TState>;
+  /** @deprecated Define initial values directly in `defineState`; retained for compatibility. */
   readonly stateDefaults?: Partial<TState>;
   readonly schemas?: GraphSchemas<TInput, TOutput, C>;
   readonly nodes: Readonly<Record<string, NodeSpec<TState, C, TVariables, TGlobal>>>;
@@ -195,6 +224,8 @@ export interface GraphDefinition<TState extends object, TInput extends object = 
   readonly log?: boolean;
   readonly variables?: Partial<TVariables>;
   readonly global?: Partial<TGlobal>;
+  /** Runtime resources inherited by `run()` and `stream()`. */
+  readonly runtime?: GraphRuntimeOptions<TVariables, TGlobal>;
 }
 export interface CompiledGraph<TState extends object, TInput extends object = Partial<TState>, TOutput extends object = TState, C extends GraphContracts = DefaultGraphContracts, TVariables extends JsonObject = JsonObject, TGlobal extends JsonObject = JsonObject> {
   readonly definition: GraphDefinition<TState, TInput, TOutput, C, TVariables, TGlobal>;

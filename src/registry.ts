@@ -14,7 +14,7 @@ import { attachExecutor } from "./executor.js";
 
 /** A named graph registry that preserves types at registration and execution boundaries. */
 export class GraphRegistry {
-  private graphs = new Map<string, CompiledGraph<object>>();
+	private graphs = new Map<string, object>();
 
   /** Compile, attach the runtime, and register a graph resource. */
   register<
@@ -27,10 +27,10 @@ export class GraphRegistry {
   >(
     definition: GraphDefinition<TState, TInput, TOutput, C, TVariables, TGlobal>,
   ): CompiledGraph<TState, TInput, TOutput, C, TVariables, TGlobal> {
-    const compiled = attachExecutor(compile(definition as never) as never) as CompiledGraph<TState, TInput, TOutput, C, TVariables, TGlobal>;
-    if (this.graphs.has(compiled.name)) throw new GraphRuntimeError(`Graph "${compiled.name}" is already registered.`);
-    this.graphs.set(compiled.name, compiled as never);
-    return compiled;
+		const compiled = attachExecutor(compile(definition));
+		if (this.graphs.has(compiled.name)) throw new GraphRuntimeError(`Graph "${compiled.name}" is already registered.`);
+		this.graphs.set(compiled.name, compiled);
+		return compiled;
   }
 
   /** Register a graph that was compiled by another package. */
@@ -45,8 +45,8 @@ export class GraphRegistry {
     compiled: CompiledGraph<TState, TInput, TOutput, C, TVariables, TGlobal>,
   ): CompiledGraph<TState, TInput, TOutput, C, TVariables, TGlobal> {
     if (this.graphs.has(compiled.name)) throw new GraphRuntimeError(`Graph "${compiled.name}" is already registered.`);
-    this.graphs.set(compiled.name, compiled as never);
-    return compiled;
+		this.graphs.set(compiled.name, compiled);
+		return compiled;
   }
 
   /** Retrieve a graph with an application-provided contract. */
@@ -60,7 +60,7 @@ export class GraphRegistry {
   >(
     name: string,
   ): CompiledGraph<TState, TInput, TOutput, C, TVariables, TGlobal> | undefined {
-    return this.graphs.get(name) as never;
+		return this.graphs.get(name) as CompiledGraph<TState, TInput, TOutput, C, TVariables, TGlobal> | undefined;
   }
 
   /** Return true when a graph name is registered. */

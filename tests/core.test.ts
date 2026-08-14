@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
-  defineGraph,
+	defineGraph,
+	defineState,
   node,
   edge,
   conditional,
@@ -73,7 +74,7 @@ describe("defineGraph + compile (Rule enforcement at compile time)", () => {
     return expect(graph.run({ messages: [] })).resolves.toBeTruthy();
   });
 
-  it("uses raw state descriptors as initial values without stateDefaults", async () => {
+	it("uses raw state descriptors as initial values without stateDefaults", async () => {
     const graph = attachExecutor(compile(defineGraph<{
       question: string;
       count: number;
@@ -92,8 +93,44 @@ describe("defineGraph + compile (Rule enforcement at compile time)", () => {
 
     const result = await graph.run({});
     expect(result.state.question).toBe("");
-    expect(result.state.count).toBe(1);
-  });
+		expect(result.state.count).toBe(1);
+	});
+
+	it("infers state and linear edges from the zero-config DSL", async () => {
+		const graph = attachExecutor(compile(defineGraph({
+			name: "inferred-state",
+			state: defineState({
+				question: "",
+				count: reducedValue(0, (previous, next) => previous + next),
+			}),
+			nodes: {
+				write: async (state) => ({ question: `${state.question}ready`, count: 1 }),
+				finish: async () => ({}),
+			},
+		})));
+
+		const result = await graph.run({});
+		expect(result.state.question).toBe("ready");
+		expect(result.state.count).toBe(1);
+		expect(graph.adjacency.get("write")?.fixed).toEqual(["finish"]);
+	});
+
+	it("inherits checkpoint configuration from graph runtime defaults", async () => {
+		const checkpoint = new MemoryCheckpointer();
+		const graph = attachExecutor(compile(defineGraph({
+			name: "runtime-checkpoint",
+			state: defineState({ messages: messagesValue(), done: false }),
+			nodes: {
+				confirm: async () => ({ done: true }),
+			},
+			interruptBefore: ["confirm"],
+			runtime: { checkpoint },
+		})));
+
+		const result = await graph.run({ messages: [] }, { threadId: "runtime-defaults" });
+		expect(result.stoppedReason).toBe("interrupt");
+		expect((await checkpoint.get("runtime-defaults"))?.node).toBe("confirm");
+	});
 
   it("throws CompileRuleViolationError on unknown entry node", () => {
     const def = defineGraph<TestState>({

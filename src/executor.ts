@@ -233,6 +233,34 @@ function loadCheckpointer<TState extends object, C extends GraphContracts = Defa
   return opts.checkpoint as Checkpointer<TState, C["interrupt"], TVariables>;
 }
 
+function resolveRunOptions<
+  TState extends object,
+  TInput extends object = Partial<TState>,
+  TOutput extends object = TState,
+  C extends GraphContracts = DefaultGraphContracts,
+  TVariables extends JsonObject = JsonObject,
+  TGlobal extends JsonObject = JsonObject,
+>(
+  graph: CompiledGraph<TState, TInput, TOutput, C, TVariables, TGlobal>,
+  opts: RunOptions<C, TVariables, TGlobal>,
+): RunOptions<C, TVariables, TGlobal> {
+  const runtime = graph.definition.runtime;
+  return {
+    ...runtime,
+    ...opts,
+    variables: {
+      ...(graph.definition.variables ?? {}),
+      ...(runtime?.variables ?? {}),
+      ...(opts.variables ?? {}),
+    } as Partial<TVariables>,
+    global: {
+      ...(graph.definition.global ?? {}),
+      ...(runtime?.global ?? {}),
+      ...(opts.global ?? {}),
+    } as Partial<TGlobal>,
+  };
+}
+
 /**
  * Return the last checkpoint for the run's thread, if resume state applies.
  * Used by Rule A4 to avoid re-interrupting a dangerous node that the human
@@ -346,10 +374,11 @@ export async function execute<TState extends object, TInput extends object = Par
   input: TInput,
   opts: RunOptions<C, TVariables, TGlobal> = {},
 ): Promise<RunResult<TState, TOutput, C["interrupt"], TVariables>> {
+  const effectiveOpts = resolveRunOptions(graph, opts);
   const events: StepEvent<TState, C>[] = [];
   let result: RunResult<TState, TOutput, C["interrupt"], TVariables>;
   try {
-    for await (const event of streamEvents(graph, input, opts)) {
+    for await (const event of streamEvents(graph, input, effectiveOpts)) {
       events.push(event);
     }
     const last = events[events.length - 1];
@@ -364,7 +393,7 @@ export async function execute<TState extends object, TInput extends object = Par
     result = {
       state: finalState,
       output,
-      variables: opts.variables as Readonly<TVariables> | undefined,
+      variables: effectiveOpts.variables as Readonly<TVariables> | undefined,
       stoppedAt: last?.node ?? null,
       stoppedReason,
       interrupt: last?.type === "interrupt" ? last.data.request : undefined,
@@ -388,6 +417,7 @@ export async function* streamEvents<TState extends object, TInput extends object
   input: TInput,
   opts: RunOptions<C, TVariables, TGlobal> = {},
 ): AsyncGenerator<StepEvent<TState, C>, void, void> {
+  opts = resolveRunOptions(graph, opts);
   const runId = randomUUID();
   const threadId = opts.threadId ?? randomUUID();
   const safety = graph.safety;
