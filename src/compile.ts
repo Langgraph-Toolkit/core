@@ -103,9 +103,9 @@ export function compile<
     converge: definition.converge,
     safety: definition.safety,
     interruptBefore: new Set(definition.interruptBefore ?? []),
-    run: (() => undefined) as never, // attached by executor.ts
-    stream: (() => undefined) as never,
-  } as CompiledGraph<TState, TInput, TOutput, C, TVariables, TGlobal>;
+    run: () => { throw new GraphDefinitionError("Compiled graph is not runnable until buildGraph() or attachExecutor() is called."); },
+    stream: () => { throw new GraphDefinitionError("Compiled graph is not runnable until buildGraph() or attachExecutor() is called."); },
+  };
 }
 
 function validate<

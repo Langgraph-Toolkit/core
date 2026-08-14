@@ -15,6 +15,7 @@ import type {
   Actor,
   Checkpoint,
   CompiledGraph,
+  GraphDefinition,
   IntentAnalysis,
   IntentAnalyzer,
   IntentClassification,
@@ -38,6 +39,7 @@ import {
   TokenBudgetExceededError,
 } from "./types.js";
 import type { ModelRegistry, Checkpointer } from "./types.js";
+import { compile } from "./compile.js";
 
 type RuntimeField = JsonValue | object;
 type RuntimeShape = {
@@ -104,6 +106,41 @@ export function attachExecutor<
   graph.run = (input, opts) => execute(graph, input, opts);
   graph.stream = (input, opts) => streamEvents(graph, input, opts);
   return graph;
+}
+
+/**
+ * Build a runnable graph from either a DSL definition or an already compiled graph.
+ *
+ * The definition overload is the canonical zero-config path. It compiles and
+ * attaches the executor in one call while preserving the explicit overload for
+ * packages that perform compilation separately.
+ */
+export function buildGraph<
+  TState extends object,
+  TInput extends object = Partial<TState>,
+  TOutput extends object = TState,
+  C extends GraphContracts = DefaultGraphContracts,
+  TVariables extends JsonObject = JsonObject,
+  TGlobal extends JsonObject = JsonObject,
+>(definition: GraphDefinition<TState, TInput, TOutput, C, TVariables, TGlobal>): CompiledGraph<TState, TInput, TOutput, C, TVariables, TGlobal>;
+export function buildGraph<
+  TState extends object,
+  TInput extends object = Partial<TState>,
+  TOutput extends object = TState,
+  C extends GraphContracts = DefaultGraphContracts,
+  TVariables extends JsonObject = JsonObject,
+  TGlobal extends JsonObject = JsonObject,
+>(graph: CompiledGraph<TState, TInput, TOutput, C, TVariables, TGlobal>): CompiledGraph<TState, TInput, TOutput, C, TVariables, TGlobal>;
+export function buildGraph<
+  TState extends object,
+  TInput extends object = Partial<TState>,
+  TOutput extends object = TState,
+  C extends GraphContracts = DefaultGraphContracts,
+  TVariables extends JsonObject = JsonObject,
+  TGlobal extends JsonObject = JsonObject,
+>(graph: GraphDefinition<TState, TInput, TOutput, C, TVariables, TGlobal> | CompiledGraph<TState, TInput, TOutput, C, TVariables, TGlobal>): CompiledGraph<TState, TInput, TOutput, C, TVariables, TGlobal> {
+  const compiled = "adjacency" in graph ? graph : compile(graph);
+  return attachExecutor(compiled);
 }
 
 function applyDefaults<TState extends object, TInput extends object = Partial<TState>, TOutput extends object = TState, C extends GraphContracts = DefaultGraphContracts, TVariables extends JsonObject = JsonObject, TGlobal extends JsonObject = JsonObject>(

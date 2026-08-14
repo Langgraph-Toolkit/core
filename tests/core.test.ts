@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
 	defineGraph,
 	defineState,
@@ -10,7 +10,7 @@ import {
   schema,
   compile,
   attachExecutor,
-  buildGraph,
+	buildGraph,
   GraphRegistry,
   MemoryCheckpointer,
   messagesValue,
@@ -29,7 +29,22 @@ import {
   CompileRuleViolationError,
   GraphRuntimeError,
   SafetyLimitExceededError,
-} from "../src/index.js";
+	} from "../src/index.js";
+
+describe("buildGraph zero-config entrypoint", () => {
+	it("compiles and attaches a runnable graph in one call", async () => {
+		const graph = buildGraph(defineGraph({
+			name: "one-call",
+			state: defineState({ question: "", answer: "" }),
+			nodes: {
+				answer: async (state) => ({ answer: state.question || "ready" }),
+			},
+		}));
+
+		const result = await graph.run({ question: "" });
+		expect(result.state.answer).toBe("ready");
+	});
+});
 
 interface TestState {
   messages: unknown[];

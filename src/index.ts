@@ -7,12 +7,12 @@
  *
  * Quick start:
  *
- *   import { defineGraph, node, edge, conditional, compile, attachExecutor,
+ *   import { defineGraph, buildGraph,
  *            messagesValue, safety, MemoryCheckpointer, ToolkitModelRegistry }
  *     from "@langgraph-toolkit/core";
  *
  *   const def = defineGraph({ name, state, nodes, entry, edges, safety, ... });
- *   const graph = attachExecutor(compile(def));
+ *   const graph = buildGraph(def);
  *   await graph.run(input, { threadId: "t1", checkpoint: new MemoryCheckpointer() });
  */
 
@@ -21,8 +21,7 @@ export { defineGraph, defineState, node, edge, conditional, converge, safety, ti
 
 // Compiler + executor
 export { compile } from "./compile.js";
-export { attachExecutor, execute, streamEvents } from "./executor.js";
-export { attachExecutor as buildGraph } from "./executor.js";
+export { attachExecutor, buildGraph, execute, streamEvents } from "./executor.js";
 
 // Registry (used by host adapters)
 export { GraphRegistry } from "./registry.js";
@@ -101,6 +100,7 @@ export {
 export type {
   GraphDefinition,
   CompiledGraph,
+  NodeLike,
   StateDescriptor,
   NodeFunction,
   NodeSpec,
@@ -150,6 +150,7 @@ export type {
   StateField,
   GraphContracts,
   DefaultGraphContracts,
+  GraphRuntimeOptions,
   GraphSchemas,
   Gate,
   GateDecision,
