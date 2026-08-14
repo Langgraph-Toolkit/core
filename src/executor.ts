@@ -613,14 +613,24 @@ export async function* streamEvents<TState extends object, TInput extends object
       const global = { ...(graph.definition.global ?? {}), ...(opts.global ?? {}) } as JsonObject;
       const nodeModel = chargedModel ?? { chat: () => Promise.reject(new GraphRuntimeError("No model bound for this node; configure ModelRegistry (Rule T3).")) };
       const ctx: NodeContext<TState, C, TVariables, TGlobal> = {
+        graph: graph.name,
         threadId,
         runId,
+        signal: opts.signal,
         emit(step) {
           eventQueue.push(step);
         },
         emitError(message, cause) {
-          void message;
-          void cause;
+          eventQueue.push({
+            type: "error",
+            graph: graph.name,
+            threadId,
+            runId,
+            node,
+            step: nodeStep,
+            ts: Date.now(),
+            data: { error: new GraphRuntimeError(message, cause) },
+          });
         },
         model: nodeModel,
         cancelled: () => cancellation?.isCancelled() ?? opts.signal?.aborted ?? false,

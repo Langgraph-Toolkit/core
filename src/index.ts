@@ -22,6 +22,7 @@ export { defineGraph, defineState, node, edge, conditional, converge, safety, ti
 // Compiler + executor
 export { compile } from "./compile.js";
 export { attachExecutor, buildGraph, execute, streamEvents } from "./executor.js";
+export { streamChatNode } from "./chat-node.js";
 
 // Registry (used by host adapters)
 export { GraphRegistry } from "./registry.js";
@@ -163,4 +164,7 @@ export type {
   InterruptRequest,
   PendingInterrupt,
   StepDescriptor,
+  StateOf,
+  InputOf,
 } from "./types.js";
+export type { StreamChatNodeOptions } from "./chat-node.js";

@@ -44,6 +44,35 @@ console.log(result.state.answer);
 
 The smallest valid graph has no `stateDefaults`, no `never`, no mandatory per-run actor, policy, checkpoint, or provider object, and no framework-specific host code.
 
+## Reuse inferred contracts instead of repeating state types
+
+When a graph grows beyond a single inline node, derive its state type from the descriptor. `StateOf` keeps node input and output code synchronized with the descriptor, so a field is declared once.
+
+```ts
+import { StateOf, defineState } from "@langgraph-toolkit/core";
+
+const chatState = defineState({ question: "", context: "", answer: "" });
+type ChatState = StateOf<typeof chatState>;
+
+const answer = async (current: ChatState): Promise<Partial<ChatState>> => ({
+  answer: `Question: ${current.question}\nContext: ${current.context}`,
+});
+```
+
+For model-backed nodes, `streamChatNode` owns the repeated thinking, token, reasoning, usage, cancellation, and final-answer event handling. Use a plain `answer` function only when the graph deliberately needs custom model orchestration.
+
+```ts
+import { streamChatNode } from "@langgraph-toolkit/core";
+
+const answer = streamChatNode({
+  system: "Answer only from the supplied context.",
+  messages: (current: ChatState) => [
+    { role: "user", content: `${current.question}\n\n${current.context}` },
+  ],
+  select: (current: ChatState, text: string) => ({ answer: text }),
+});
+```
+
 ## Configure once, override only when needed
 
 Graph-level runtime options are inherited by `run` and `stream`. Optional run overrides remain available for request-specific values such as a thread identifier or a human answer.

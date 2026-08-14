@@ -44,6 +44,10 @@ export interface StateDescriptor<TState extends object> {
   readonly fields: StateSchema<TState>;
   readonly defaults: Partial<TState>;
 }
+/** Infer the runtime state object from a state descriptor without repeating the state interface. */
+export type StateOf<TDescriptor> = TDescriptor extends StateDescriptor<infer TState> ? TState : JsonObject;
+/** Infer the graph input object from a compiled graph contract. */
+export type InputOf<TGraph> = TGraph extends { readonly definition: { readonly state: StateSchema<infer TState> } } ? Partial<TState> : JsonObject;
 /** The runtime value represented by a state field descriptor. */
 export type StateValue<TField> = TField extends ReducedField<infer TValue> ? TValue : TField;
 /** Infer the state value object from a field descriptor map. */
@@ -152,8 +156,11 @@ export interface StepDescriptor { readonly id: string; readonly label: string; r
 export type NodeFunction<TState extends object, C extends GraphContracts = DefaultGraphContracts, TVariables extends JsonObject = JsonObject, TGlobal extends JsonObject = JsonObject> =
   (state: TState, ctx: NodeContext<TState, C, TVariables, TGlobal>) => Promise<Partial<TState>> | Partial<TState>;
 export interface NodeContext<TState extends object = object, C extends GraphContracts = DefaultGraphContracts, TVariables extends JsonObject = JsonObject, TGlobal extends JsonObject = JsonObject> {
+  readonly graph: string;
   readonly threadId: string;
   readonly runId: string;
+  /** Abort signal propagated from the host adapter into model/tool calls. */
+  readonly signal?: AbortSignal;
   readonly actor?: Actor;
   readonly variables: Readonly<TVariables>;
   readonly global: Readonly<TGlobal>;
