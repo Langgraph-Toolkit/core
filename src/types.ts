@@ -41,6 +41,12 @@ export class InterruptSignal<TInterrupt extends JsonValue = JsonValue> extends E
 export interface ValueSchema<T> { readonly name: string; parse(value: JsonValue): T; }
 export function createSchema<T>(name: string, parse: (value: JsonValue) => T): ValueSchema<T> { return { name, parse }; }
 
+/** A schema declaration that can supply a typed zero-config default to createState. */
+export interface StateSchemaValue<T> extends ValueSchema<T> {
+  readonly __schemaValue: true;
+  readonly defaultValue?: T;
+}
+
 export interface ReducedField<T> { readonly __reduced: true; readonly default: T; readonly reducer: (prev: T, next: T) => T; }
 export type StateField<T> = ReducedField<T> | T;
 export type StateSchema<TState extends object> = { [K in keyof TState]: StateField<TState[K]> };
@@ -80,13 +86,17 @@ export type StateOf<TDescriptor> = TDescriptor extends StateDescriptor<infer TSt
 /** Infer the graph input object from a compiled graph contract. */
 export type InputOf<TGraph> = TGraph extends { readonly definition: { readonly state: StateSchema<infer TState> } } ? Partial<TState> : JsonObject;
 /** The runtime value represented by a state field descriptor. */
-export type StateValue<TField> = TField extends ReducedField<infer TValue> ? TValue : TField;
+export type StateValue<TField> = TField extends StateSchemaValue<infer TValue>
+  ? TValue
+  : TField extends ReducedField<infer TValue>
+    ? TValue
+    : TField;
 /** Infer the state value object from a field descriptor map. */
 export type InferState<TFields> = {
   [K in keyof TFields]: StateValue<TFields[K]>;
 };
 /** Serializable field values accepted by the inference-first state DSL. */
-export type StateFieldInput = object | string | number | boolean | null;
+export type StateFieldInput = JsonValue | StateSchemaValue<JsonValue | undefined>;
 /** A state descriptor map with its inferred state value type attached. */
 export type InferredStateDescriptor<TFields extends Record<string, StateFieldInput>> = Omit<StateDescriptor<InferState<TFields>>, "fields"> & {
   readonly fields: TFields;
@@ -152,6 +162,28 @@ export interface ToolDefinition<TArgs extends object = JsonObject, TResult exten
   readonly execute: (args: TArgs, ctx: ToolContext) => TResult | Promise<TResult>;
 }
 export interface ToolContext { readonly threadId: string; readonly runId: string; readonly actor?: Actor; readonly variables: JsonObject; readonly global: JsonObject; }
+/** Structural agent accepted by a graph node without coupling Core runtime to a package implementation. */
+export interface NodeAgent {
+  readonly name: string;
+  stream(input: JsonObject, options?: {
+    readonly signal?: AbortSignal;
+    readonly threadId?: string;
+    readonly runId?: string;
+    readonly actor?: Actor;
+    readonly variables?: JsonObject;
+    readonly global?: JsonObject;
+  }): AsyncIterable<
+    | { readonly type: "token" | "reasoning"; readonly value: string }
+    | { readonly type: "tool_start"; readonly call: ModelToolCall }
+    | { readonly type: "tool_end"; readonly call: ModelToolCall; readonly result: JsonValue }
+    | { readonly type: "usage"; readonly usage: TokenUsage }
+    | { readonly type: "output"; readonly output: { readonly content?: string; readonly toolCalls?: readonly ModelToolCall[] } }
+    | { readonly type: "step"; readonly event: StepEvent<object> }
+    | { readonly type: "error"; readonly error: Error }
+  >;
+}
+/** Normalized result returned by NodeContext after the runtime forwards an agent stream. */
+export interface NodeAgentResult { readonly agent: string; readonly content: string; readonly toolCalls: readonly string[]; }
 export interface IntentClassifier<TInput extends object, TIntent extends string> {
   readonly name: string;
   readonly classify: (input: TInput, ctx: IntentContext) => TIntent | Promise<TIntent>;
@@ -207,6 +239,8 @@ export interface NodeContext<TState extends object = object, C extends GraphCont
   /** Request a human answer; the default runtime throws internally after recording the request. */
   readonly ask: (request: InterruptRequest<C["interrupt"]>) => void;
   readonly callTool: <TArgs extends object, TResult extends JsonValue>(tool: ToolDefinition<TArgs, TResult>, args: TArgs) => Promise<TResult>;
+  /** Run an agent and automatically forward tokens, reasoning, tool events, errors and usage to the graph stream. */
+  readonly runAgent: (agent: NodeAgent, input: JsonObject) => Promise<NodeAgentResult>;
   readonly detectIntent: <TInput extends object, TIntent extends string>(classifier: IntentClassifier<TInput, TIntent>, input: TInput) => Promise<TIntent>;
   readonly analyzeIntent: <TInput extends object, TIntent extends string, TDetails extends JsonObject>(analyzer: IntentAnalyzer<TInput, TIntent, TDetails>, input: TInput) => Promise<IntentClassification<TIntent, TDetails>>;
 }

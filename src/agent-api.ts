@@ -5,10 +5,13 @@
  * do not assume SQL, MCP, chat, rows, approval terminology or a host
  * framework.
  */
-import type { CompiledGraph, JsonObject, JsonValue, RunOptions, StepEvent } from "./types.js";
+import type { ChatMessage, CompiledGraph, JsonObject, JsonValue, ModelToolCall, ModelToolSpec, RunOptions, StepEvent, TokenUsage } from "./types.js";
+import type { Model } from "./model-api.js";
 
 /** Options accepted by an agent execution. */
 export interface AgentRunOptions extends RunOptions {
+  /** Execution id supplied automatically by a graph node runtime when available. */
+  readonly runId?: string;
   readonly signal?: AbortSignal;
 }
 
@@ -18,13 +21,15 @@ export interface AgentResult<TOutput extends object> {
   readonly state?: object;
 }
 
-/** Typed event emitted by an agent stream. */
-export interface AgentEvent<TOutput extends object = JsonObject> {
-  readonly type: "step" | "output" | "error";
-  readonly event?: StepEvent<object>;
-  readonly output?: TOutput;
-  readonly error?: Error;
-}
+/** Typed lifecycle event emitted by an agent stream. */
+export type AgentEvent<TOutput extends object = JsonObject> =
+  | { readonly type: "step"; readonly event: StepEvent<object> }
+  | { readonly type: "token" | "reasoning"; readonly value: string }
+  | { readonly type: "tool_start"; readonly call: ModelToolCall }
+  | { readonly type: "tool_end"; readonly call: ModelToolCall; readonly result: JsonValue }
+  | { readonly type: "usage"; readonly usage: TokenUsage }
+  | { readonly type: "output"; readonly output: TOutput }
+  | { readonly type: "error"; readonly error: Error };
 
 /** Generic agent contract usable for workflows beyond chat. */
 export interface Agent<TInput extends object = JsonObject, TOutput extends object = JsonObject> {
@@ -33,12 +38,37 @@ export interface Agent<TInput extends object = JsonObject, TOutput extends objec
   stream(input: TInput, options?: AgentRunOptions): AsyncIterable<AgentEvent<TOutput>>;
 }
 
+/** A model-callable tool supplied directly or by a lazily discovered source such as MCP. */
+export interface AgentTool {
+  readonly spec: ModelToolSpec;
+  execute(args: JsonObject): JsonValue | Promise<JsonValue>;
+}
+
+/** Structural tool source accepted by `createAgent` without coupling Core to an integration package. */
+export interface AgentToolSource {
+  bindTools?(options?: AgentRunOptions): Promise<readonly AgentTool[]>;
+}
+
+/** Default text output returned by a model-backed agent. */
+export interface AgentTextOutput {
+  readonly content: string;
+  readonly toolCalls: readonly ModelToolCall[];
+}
+
 /** Agent construction options. */
 export interface AgentOptions<TInput extends object, TOutput extends object> {
   readonly name?: string;
   readonly graph?: CompiledGraph<TInput, TInput, TOutput>;
   readonly run?: (input: TInput, options?: AgentRunOptions) => Promise<AgentResult<TOutput>>;
   readonly stream?: (input: TInput, options?: AgentRunOptions) => AsyncIterable<AgentEvent<TOutput>>;
+  /** Model-backed agents need no application-side run wrapper. */
+  readonly model?: Model;
+  /** Direct tools or lazy sources such as the object returned by `createMCP`. */
+  readonly tools?: readonly (AgentTool | AgentToolSource)[];
+  /** Optional policy applied before a JSON-safe input becomes a model request. */
+  readonly instructions?: string;
+  /** Limit model/tool rounds for the built-in generic execution loop. */
+  readonly maxRounds?: number;
 }
 
 /** Create a generic agent from a compiled graph or injected implementation. */
@@ -48,12 +78,14 @@ export function createAgent<TInput extends object, TOutput extends object>(optio
     name,
     run: async (input, runOptions) => {
       if (options.run) return options.run(input, runOptions);
+      if (options.model) return runModelAgent<TInput, TOutput>(name, options, input, runOptions);
       if (!options.graph) throw new Error(`Agent "${name}" has no graph or run implementation.`);
       const result = await options.graph.run(input, runOptions);
       return { output: result.output ?? copyOutput<TOutput>(result.state), state: result.state };
     },
     stream: (input, runOptions) => {
       if (options.stream) return options.stream(input, runOptions);
+      if (options.model) return streamModelAgent<TInput, TOutput>(name, options, input, runOptions);
       if (!options.graph) return errorStream<TOutput>(new Error(`Agent "${name}" has no graph or stream implementation.`));
       return graphStream(options.graph, input, runOptions);
     },
@@ -241,4 +273,118 @@ async function* errorStream<TOutput extends object>(error: Error): AsyncIterable
 
 function copyOutput<TOutput extends object>(value: object): TOutput {
   return Object.assign({} as TOutput, value);
+}
+
+async function runModelAgent<TInput extends object, TOutput extends object>(
+  name: string,
+  options: AgentOptions<TInput, TOutput>,
+  input: TInput,
+  runOptions?: AgentRunOptions,
+): Promise<AgentResult<TOutput>> {
+  const model = options.model;
+  if (!model) throw new Error(`Agent "${name}" has no model.`);
+  const tools = await resolveAgentTools(options.tools, runOptions);
+  const messages = toAgentMessages(input, options.instructions);
+  const calls: ModelToolCall[] = [];
+  const maxRounds = options.maxRounds ?? 8;
+
+  for (let round = 0; round < maxRounds; round += 1) {
+    const response = await model.generate({ messages, tools: tools.map((tool) => tool.spec), signal: runOptions?.signal });
+    messages.push({ role: "assistant", content: response.content, ...(response.toolCalls ? { toolCalls: response.toolCalls } : {}) });
+    if (!response.toolCalls || response.toolCalls.length === 0) return { output: toAgentOutput<TOutput>(response.content, calls) };
+    for (const call of response.toolCalls) {
+      const tool = tools.find((candidate) => candidate.spec.name === call.name);
+      if (!tool) throw new Error(`Agent "${name}" requested unavailable tool "${call.name}".`);
+      calls.push(call);
+      messages.push({ role: "tool", content: JSON.stringify(await executeAgentTool(tool, call)), toolCallId: call.id });
+    }
+  }
+  throw new Error(`Agent "${name}" exceeded ${maxRounds} tool rounds.`);
+}
+
+async function* streamModelAgent<TInput extends object, TOutput extends object>(name: string, options: AgentOptions<TInput, TOutput>, input: TInput, runOptions?: AgentRunOptions): AsyncIterable<AgentEvent<TOutput>> {
+  try {
+    const model = options.model;
+    if (!model) throw new Error(`Agent "${name}" has no model.`);
+    const tools = await resolveAgentTools(options.tools, runOptions);
+    const messages = toAgentMessages(input, options.instructions);
+    const calls: ModelToolCall[] = [];
+    const maxRounds = options.maxRounds ?? 8;
+
+    for (let round = 0; round < maxRounds; round += 1) {
+      const collected = new Map<number, { id?: string; name?: string; arguments: string }>();
+      let content = "";
+      for await (const chunk of model.stream({ messages, tools: tools.map((tool) => tool.spec), signal: runOptions?.signal })) {
+        if (chunk.type === "token") { content += chunk.value; yield { type: "token", value: chunk.value }; }
+        if (chunk.type === "reasoning") yield { type: "reasoning", value: chunk.value };
+        if (chunk.type === "usage") yield { type: "usage", usage: chunk.value };
+        if (chunk.type === "tool_call") {
+          const current = collected.get(chunk.value.index) ?? { arguments: "" };
+          collected.set(chunk.value.index, { id: chunk.value.id ?? current.id, name: chunk.value.name ?? current.name, arguments: `${current.arguments}${chunk.value.arguments}` });
+        }
+      }
+      const roundCalls = [...collected.values()].map((call, index): ModelToolCall => ({
+        id: call.id ?? `${name}-${round}-${index}`,
+        name: call.name ?? (() => { throw new Error(`Agent "${name}" received an unnamed tool call.`); })(),
+        arguments: parseToolArguments(call.arguments, name),
+      }));
+      messages.push({ role: "assistant", content, ...(roundCalls.length ? { toolCalls: roundCalls } : {}) });
+      if (roundCalls.length === 0) { yield { type: "output", output: toAgentOutput<TOutput>(content, calls) }; return; }
+      for (const call of roundCalls) {
+        const tool = tools.find((candidate) => candidate.spec.name === call.name);
+        if (!tool) throw new Error(`Agent "${name}" requested unavailable tool "${call.name}".`);
+        yield { type: "tool_start", call };
+        const result = await executeAgentTool(tool, call);
+        yield { type: "tool_end", call, result };
+        calls.push(call);
+        messages.push({ role: "tool", content: JSON.stringify(result), toolCallId: call.id });
+      }
+    }
+    throw new Error(`Agent "${name}" exceeded ${maxRounds} tool rounds.`);
+  } catch (error) {
+    yield { type: "error", error: error instanceof Error ? error : new Error(String(error)) };
+  }
+}
+
+async function resolveAgentTools(sources: readonly (AgentTool | AgentToolSource)[] | undefined, options?: AgentRunOptions): Promise<readonly AgentTool[]> {
+  const tools: AgentTool[] = [];
+  for (const source of sources ?? []) {
+    if ("spec" in source) tools.push(source);
+    else if (source.bindTools) tools.push(...await source.bindTools(options));
+  }
+  return tools;
+}
+
+/** Preserve the agent loop when a provider-backed tool rejects one malformed or transient call. */
+async function executeAgentTool(tool: AgentTool, call: ModelToolCall): Promise<JsonValue> {
+  try {
+    return await tool.execute(call.arguments);
+  } catch (error) {
+    return {
+      error: {
+        code: "TOOL_EXECUTION_FAILED",
+        message: error instanceof Error ? error.message : String(error),
+      },
+    };
+  }
+}
+
+function toAgentMessages(input: object, instructions?: string): ChatMessage[] {
+  const record = input as Record<string, JsonValue>;
+  const query = typeof record.query === "string" ? record.query : JSON.stringify(input);
+  return [...(instructions ? [{ role: "system" as const, content: instructions }] : []), { role: "user" as const, content: query }];
+}
+
+function toAgentOutput<TOutput extends object>(content: string, toolCalls: readonly ModelToolCall[]): TOutput {
+  return { content, toolCalls } as TOutput;
+}
+
+function parseToolArguments(source: string, name: string): JsonObject {
+  try {
+    const parsed: JsonValue = JSON.parse(source || "{}");
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("Tool arguments must be an object.");
+    return parsed as JsonObject;
+  } catch (error) {
+    throw new Error(`Agent "${name}" received invalid tool arguments: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }

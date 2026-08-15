@@ -62,6 +62,21 @@ export interface ModelOptions {
   readonly factory?: (config: LLMProviderConfig) => LLMProvider;
 }
 
+/** Caller-owned named model collection. Core never creates a provider by default. */
+export interface ModelPoolOptions<TName extends string> {
+  readonly models: Readonly<Record<TName, Model>>;
+  readonly route?: (available: readonly TName[], request: ModelRequest) => TName;
+}
+
+/** Framework-neutral multi-model routing, fallback and ensemble facade. */
+export interface ModelPool<TName extends string> {
+  readonly names: readonly TName[];
+  get(name: TName): Model;
+  route(request: ModelRequest): Model;
+  fallback(names: readonly TName[]): Model;
+  ensemble(names: readonly TName[], select?: (responses: readonly ModelResponse[]) => ModelResponse): Model;
+}
+
 /** Embedding generation options. */
 export interface EmbeddingOptions {
   readonly model?: string;
@@ -118,7 +133,7 @@ export interface SpeechModelOptions {
 }
 
 /** Create a model facade from a Core-compatible provider. */
-export function createModel(options: ModelOptions = {}): Model {
+export function createModel(options: ModelOptions): Model {
   const provider = options.provider ?? createProvider(options);
   return {
     name: options.name ?? provider.name,
@@ -126,13 +141,47 @@ export function createModel(options: ModelOptions = {}): Model {
     stream: (request) => streamProvider(provider, request),
     structured: <TValue extends object>(schema: ValueSchema<TValue>): StructuredModel<TValue> => ({
       generate: async (request) => {
-        const response = await provider.chat(request.messages, {
-          ...toChatOptions(request),
-          responseFormat: { type: "json_schema", name: schema.name, schema: { type: "object" }, strict: true },
-        });
-        return schema.parse(parseJson(response.content));
+        const parse = (response: ChatResult): TValue => schema.parse(parseJson(response.content));
+        const options = toChatOptions(request);
+        try {
+          return parse(await provider.chat(request.messages, {
+            ...options,
+            responseFormat: { type: "json_schema", name: schema.name, schema: { type: "object" }, strict: true },
+          }));
+        } catch (error) {
+          if (!isUnsupportedResponseFormat(error)) throw error;
+          const messages = jsonOnlyMessages(request.messages, schema.name);
+          try {
+            return parse(await provider.chat(messages, { ...options, responseFormat: { type: "json_object" } }));
+          } catch (fallbackError) {
+            if (!isUnsupportedResponseFormat(fallbackError)) throw fallbackError;
+            return parse(await provider.chat(messages, options));
+          }
+        }
       },
     }),
+  };
+}
+
+/**
+ * Compose already-configured models. The pool has no provider knowledge and
+ * therefore cannot silently choose a vendor, credential or model.
+ */
+export function createModelPool<TName extends string>(options: ModelPoolOptions<TName>): ModelPool<TName> {
+  const names = Object.keys(options.models) as TName[];
+  if (names.length === 0) throw new Error("createModelPool requires at least one configured model.");
+  const get = (name: TName): Model => {
+    const model = options.models[name];
+    if (!model) throw new Error(`Model pool entry \"${name}\" is not configured.`);
+    return model;
+  };
+  const select = (request: ModelRequest): Model => get(options.route?.(names, request) ?? names[0]);
+  return {
+    names,
+    get,
+    route: select,
+    fallback: (modelNames) => fallbackModel(modelNames, get),
+    ensemble: (modelNames, chooser) => ensembleModel(modelNames, get, chooser),
   };
 }
 
@@ -178,15 +227,63 @@ export interface SpeechModel {
 }
 
 function createProvider(options: ModelOptions): LLMProvider {
-  const config = options.config ?? { driver: "mock", model: options.name ?? "core-local", mockResponse: "" };
-  if (options.factory) return options.factory(config);
+  if (!options.config || !options.factory) {
+    throw new Error("createModel requires an explicit provider, or both config and factory.");
+  }
+  return options.factory(options.config);
+}
+
+function jsonOnlyMessages(messages: readonly ChatMessage[], schemaName: string): readonly ChatMessage[] {
+  return [{ role: "system", content: `Return only one valid JSON object for the ${schemaName} schema. Do not use Markdown fences or explanatory text.` }, ...messages];
+}
+
+function isUnsupportedResponseFormat(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  return message.includes("response_format") && (message.includes("unavailable") || message.includes("unsupported") || message.includes("not supported"));
+}
+
+function fallbackModel<TName extends string>(names: readonly TName[], get: (name: TName) => Model): Model {
+  if (names.length === 0) throw new Error("Model fallback requires at least one configured model.");
   return {
-    name: config.model,
-    chat: async () => ({ content: config.mockResponse ?? "" }),
-    stream: async function* () {
-      if (config.mockResponse) yield config.mockResponse;
+    name: "fallback",
+    generate: async (request) => {
+      let lastError: Error | undefined;
+      for (const name of names) {
+        try { return await get(name).generate(request); }
+        catch (error) { lastError = error instanceof Error ? error : new Error(String(error)); }
+      }
+      throw lastError ?? new Error("Model fallback failed.");
     },
+    stream: async function* (request) {
+      let lastError: Error | undefined;
+      for (const name of names) {
+        try { yield* get(name).stream(request); return; }
+        catch (error) { lastError = error instanceof Error ? error : new Error(String(error)); }
+      }
+      throw lastError ?? new Error("Model fallback failed.");
+    },
+    structured: <TValue extends object>(responseSchema: ValueSchema<TValue>): StructuredModel<TValue> => ({
+      generate: async (request) => fallbackModel(names, get).structured(responseSchema).generate(request),
+    }),
   };
+}
+
+function ensembleModel<TName extends string>(names: readonly TName[], get: (name: TName) => Model, select?: (responses: readonly ModelResponse[]) => ModelResponse): Model {
+  if (names.length === 0) throw new Error("Model ensemble requires at least one configured model.");
+  const choose = select ?? ((responses: readonly ModelResponse[]) => responses.reduce((best, candidate) => candidate.content.length > best.content.length ? candidate : best));
+  return {
+    name: "ensemble",
+    generate: async (request) => choose(await Promise.all(names.map((name) => get(name).generate(request)))),
+    stream: async function* (request) { yield* asTokens(choose(await Promise.all(names.map((name) => get(name).generate(request))))); },
+    structured: <TValue extends object>(responseSchema: ValueSchema<TValue>): StructuredModel<TValue> => ({
+      generate: async (request) => responseSchema.parse(JSON.parse((await Promise.all(names.map((name) => get(name).generate(request)))).map((response) => response.content).join("\n"))),
+    }),
+  };
+}
+
+async function* asTokens(response: ModelResponse): AsyncIterable<ModelChunk> {
+  if (response.reasoning) yield { type: "reasoning", value: response.reasoning };
+  if (response.content) yield { type: "token", value: response.content };
 }
 
 function toChatOptions(request: ModelRequest): ChatStreamOptions {

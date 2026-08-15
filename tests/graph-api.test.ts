@@ -5,11 +5,52 @@ import {
   createNode,
   createState,
 } from "../src/index.js";
+import { createGraphLifecycle, createToolkitRuntime } from "../src/runtime-barrel.js";
 import { reducedValue } from "../src/legacy.js";
 import { MemoryCheckpointer } from "../src/testing-barrel.js";
 import type { FrameworkState } from "../src/types.js";
 
 describe("canonical graph facade", () => {
+  it("exposes a host-neutral invoke, state, history, replay, and fork lifecycle", async () => {
+    const checkpoint = new MemoryCheckpointer();
+    const graph = createGraph({
+      name: "lifecycle-contract",
+      state: createState({ count: 0 }),
+    })
+      .node("increment", createNode(async (state: { count: number }) => ({ count: state.count + 1 })))
+      .start("increment")
+      .checkpoint(checkpoint)
+      .build();
+    const runtime = createToolkitRuntime((registry) => { registry.add(graph); });
+    const lifecycle = createGraphLifecycle(runtime);
+
+    const invoked = await lifecycle.invoke("lifecycle-contract", { input: {}, threadId: "lifecycle-a" });
+    expect(invoked.state.count).toBe(1);
+
+    const state = await lifecycle.state("lifecycle-contract", "lifecycle-a");
+    expect(state?.state.count).toBe(1);
+    const history = await lifecycle.history("lifecycle-contract", "lifecycle-a");
+    expect(history.length).toBeGreaterThan(0);
+    const snapshot = history[0];
+    expect(snapshot).toBeDefined();
+    if (!snapshot) throw new Error("Expected a lifecycle checkpoint.");
+
+    const fork = await lifecycle.fork("lifecycle-contract", {
+      threadId: "lifecycle-a",
+      checkpointId: snapshot.checkpointId,
+      targetThreadId: "lifecycle-b",
+    });
+    expect(fork.threadId).toBe("lifecycle-b");
+    expect((await lifecycle.state("lifecycle-contract", "lifecycle-b"))?.state.count).toBe(1);
+
+    const replayed = await lifecycle.replay("lifecycle-contract", {
+      input: {},
+      threadId: "lifecycle-a",
+      checkpointId: snapshot.checkpointId,
+    });
+    expect(replayed.state.count).toBe(2);
+  });
+
   it("builds and runs an inference-first graph", async () => {
     const graph = createGraph({
       name: "facade-linear",

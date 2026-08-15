@@ -151,9 +151,20 @@ export function defineState<TFields extends Record<string, StateFieldInput>>(fie
   const defaults: Partial<import("./types.js").InferState<TFields>> = {};
   for (const key of Object.keys(fields) as Array<keyof TFields>) {
     const field = fields[key];
-    defaults[key] = (isReducedField(field) ? field.default : field) as import("./types.js").InferState<TFields>[typeof key];
+    const schemaDefault = isStateSchemaValue(field) ? field.defaultValue : undefined;
+    if (schemaDefault !== undefined) {
+      defaults[key] = schemaDefault as import("./types.js").InferState<TFields>[typeof key];
+      continue;
+    }
+    if (!isStateSchemaValue(field)) {
+      defaults[key] = (isReducedField(field) ? field.default : field) as import("./types.js").InferState<TFields>[typeof key];
+    }
   }
   return { __stateDescriptor: true, fields, defaults };
+}
+
+function isStateSchemaValue(value: StateFieldInput): value is import("./types.js").StateSchemaValue<import("./types.js").JsonValue | undefined> {
+  return typeof value === "object" && value !== null && "__schemaValue" in value && value.__schemaValue === true;
 }
 
 /**

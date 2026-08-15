@@ -74,8 +74,14 @@ export interface ErrorRoute<TState extends object> {
   readonly targets: readonly string[];
 }
 
-/** Callable accepted by high-level fluent capability bridges. */
-export type FluentCallable<TOutput extends object = object> = (...args: readonly never[]) => Promise<TOutput> | TOutput;
+/** Typed runnable accepted by high-level workflow capabilities. */
+export type FluentCallable<TInput extends object = JsonObject, TOutput extends object = JsonObject> = (input: TInput) => Promise<TOutput> | TOutput;
+
+/** Agent-compatible participant accepted directly by parallel workflow branches. */
+export interface WorkflowParticipant<TState extends object> {
+  readonly name: string;
+  run(input: TState): Promise<{ readonly output: Partial<TState> }>;
+}
 
 /** Retry policy accepted at workflow or node scope. */
 export interface RetryOptions {
@@ -86,7 +92,7 @@ export interface RetryOptions {
 /** Fallback policy accepted at workflow or node scope. */
 export interface FallbackOptions<TOutput extends object = object> {
   readonly node?: string;
-  readonly run?: FluentCallable<TOutput>;
+  readonly run?: FluentCallable<object, TOutput>;
   readonly policy?: "recover" | "return" | "rethrow";
 }
 
@@ -105,12 +111,12 @@ export interface GuardOptions<TState extends object> {
 }
 
 /** Static parallel task map used by the high-level workflow facade. */
-export type ParallelOptions<TOutput extends object = object> = Readonly<Record<string, FluentCallable<TOutput>>>;
+export type ParallelOptions<TState extends object> = Readonly<Record<string, FluentCallable<TState, Partial<TState>> | WorkflowParticipant<TState>>>;
 
 /** Collection mapping declaration with inferred or explicit output field. */
 export interface MapOptions<TState extends object, TOutput extends object = object> {
   readonly from: (state: TState) => readonly object[];
-  readonly run: FluentCallable<TOutput>;
+  readonly run: FluentCallable<object, TOutput>;
   readonly into?: keyof TState & string;
 }
 
@@ -118,7 +124,7 @@ export interface MapOptions<TState extends object, TOutput extends object = obje
 export interface ReduceOptions<TState extends object> {
   readonly from: keyof TState & string;
   readonly into?: keyof TState & string;
-  readonly reducer: (previous: never, next: never) => JsonValue;
+  readonly reducer: (previous: JsonValue, next: JsonValue) => JsonValue;
 }
 
 /** Static route map used by the high-level facade. */
@@ -265,7 +271,7 @@ export interface GraphBuilder<
   /** Register a static or classifier-backed route map. */
   route(routes: RouteMap): GraphBuilder<TState, TInput, TOutput, C, TVariables, TGlobal>;
   /** Register parallel named capabilities. */
-  parallel(options?: ParallelOptions): GraphBuilder<TState, TInput, TOutput, C, TVariables, TGlobal>;
+  parallel(options?: ParallelOptions<TState>): GraphBuilder<TState, TInput, TOutput, C, TVariables, TGlobal>;
   /** Register a retry policy. */
   retry(options?: RetryOptions | number): GraphBuilder<TState, TInput, TOutput, C, TVariables, TGlobal>;
   /** Register a fallback policy. */
@@ -690,7 +696,7 @@ function createBuilder<
       const target = `__fallback_${definition.fallbacks?.length ?? 0}`;
       const fallback: FallbackSpec = { target, policy };
       const fallbackNode: NodeSpec<TState, C, TVariables, TGlobal> = {
-        fn: async () => options.run!() as unknown as Partial<TState>,
+        fn: async (state) => options.run!(state) as unknown as Partial<TState>,
         label: "Fallback recovery",
         stepLabel: "Fallback recovery",
       };
@@ -773,10 +779,12 @@ function createMemoryCheckpointer(): Checkpointer {
   const checkpoints = new Map<string, Checkpoint>();
   return {
     async get(threadId) {
+      // Map preserves insertion order. Prefer it to a timestamp sort because
+      // multiple nodes can checkpoint within the same millisecond, where a
+      // sort tie could return the oldest record and re-trigger an approval.
       const matching = [...checkpoints.values()]
-        .filter((checkpoint) => checkpoint.threadId === threadId)
-        .sort((left, right) => right.createdAt - left.createdAt);
-      return matching[0] ?? null;
+        .filter((checkpoint) => checkpoint.threadId === threadId);
+      return matching.at(-1) ?? null;
     },
     async put(checkpoint) {
       checkpoints.set(`${checkpoint.threadId}:${checkpoint.checkpointId}`, checkpoint);

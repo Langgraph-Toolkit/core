@@ -10,7 +10,15 @@ export { compile } from "./compile.js";
 export { attachExecutor, execute, withTokenBudget, resetTokenLedger } from "./executor.js";
 export { GraphRegistry } from "./registry.js";
 export { ToolkitRuntime, createToolkitRuntime } from "./runtime.js";
+export { createGraphLifecycle } from "./graph-lifecycle.js";
 export { streamChatNode } from "./chat-node.js";
 
 export type { ToolkitRuntimeConfigurator, ToolkitRuntimeOptions } from "./runtime.js";
+export type {
+  GraphLifecycle,
+  GraphInvokeRequest,
+  GraphResumeRequest,
+  GraphReplayRequest,
+  GraphForkRequest,
+} from "./graph-lifecycle.js";
 export type { StreamChatNodeOptions } from "./chat-node.js";

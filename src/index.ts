@@ -32,6 +32,11 @@ export {
   createTier,
 } from "./graph-api.js";
 
+/** Schema builder for typed state, tool inputs and structured model outputs. */
+export { schema } from "./schema.js";
+export type { SchemaValue, SchemaShape, InferSchemaShape } from "./schema.js";
+export { intentAnalyzer } from "./defineGraph.js";
+
 /** Graph builder contracts for inference-first workflow composition. */
 export type {
   GraphBuilder,
@@ -79,6 +84,8 @@ export type {
   NodeFunction,
   NodeSpec,
   NodeContext,
+  NodeAgent,
+  NodeAgentResult,
   StateDescriptor,
   StateSchema,
   StateField,
@@ -125,6 +132,7 @@ export type {
   JsonValue,
   JsonObject,
   ValueSchema,
+  StateSchemaValue,
   ChatMessage,
   ChatResult,
   ChatStreamChunk,
@@ -144,6 +152,7 @@ export type {
 /** Model facades and multimodal contracts. */
 export {
   createModel,
+  createModelPool,
   createEmbeddingModel,
   createSpeechModel,
   modelUsage,
@@ -171,7 +180,8 @@ export type {
   EmbeddingOptions,
   EmbeddingResult,
   SpeechModel,
-  SpeechModelOptions,
+  ModelPool,
+  ModelPoolOptions,
   SpeechInput,
   SpeechText,
   SpeechOptions,
@@ -183,6 +193,9 @@ export type {
 export type {
   Agent,
   AgentOptions,
+  AgentTool,
+  AgentToolSource,
+  AgentTextOutput,
   AgentResult,
   AgentEvent,
   AgentRunOptions,

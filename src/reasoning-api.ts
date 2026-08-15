@@ -94,8 +94,11 @@ export function createReasoning<TIntent extends string = string>(options: Reason
     }
     const activeModel = runOptions?.model ?? model;
     if (!activeModel) throw new Error(`Reasoning "${name}" requires a Model or classify callback.`);
+    const allowedIntents = options.intents?.length
+      ? `Use exactly one of these intent values: ${options.intents.map((intent) => JSON.stringify(intent)).join(", ")}. Do not invent, combine, translate, or qualify an intent value.`
+      : "Return one concise intent value that describes the input.";
     const response = await activeModel.structured(classificationSchema<TIntent>(options.intents)).generate({
-      messages: [{ role: "system", content: "Classify the input into one intent and return the requested JSON shape." }, { role: "user", content: JSON.stringify(value) }],
+      messages: [{ role: "system", content: `Classify the input into one intent and return the requested JSON shape. ${allowedIntents}` }, { role: "user", content: JSON.stringify(value) }],
       reasoningEffort: runOptions?.reasoningEffort,
       signal: runOptions?.signal,
     });

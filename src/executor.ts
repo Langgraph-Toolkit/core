@@ -575,7 +575,16 @@ export async function* streamEvents<TState extends object, TInput extends object
     : undefined;
 
   try {
-    let state = applyDefaults(graph, input);
+    // A resumed graph may intentionally receive no new input. Hydrate the
+    // persisted state before validation so required application fields, such
+    // as Chat-MCP's query, come from the checkpoint instead of being rejected
+    // before the resume node receives ctx.answer.
+    const cp = loadCheckpointer<TState, C, TVariables>(opts);
+    const lastCheckpoint = cp && !opts.resumeFrom ? await cp.get(threadId) : null;
+    const checkpointInput = lastCheckpoint === null
+      ? input
+      : { ...lastCheckpoint.state, ...input };
+    let state = applyDefaults(graph, checkpointInput);
     state = injectFrameworkState(state, {
       currentDateTime: new Date().toISOString(),
       threadId,
@@ -586,14 +595,9 @@ export async function* streamEvents<TState extends object, TInput extends object
     let round = 0;
 
     // Resume from checkpoint
-    const cp = loadCheckpointer<TState, C, TVariables>(opts);
-    if (cp && !opts.resumeFrom) {
-      const last = await cp.get(threadId);
-      if (last) {
-        state = mergeState(graph, state, last.state as never as Partial<TState>);
-        node = last.node === "END" ? graph.entry : last.node;
-        round = last.round;
-      }
+    if (lastCheckpoint) {
+      node = lastCheckpoint.node === "END" ? graph.entry : lastCheckpoint.node;
+      round = lastCheckpoint.round;
     }
 
     const seen = new Set<string>(); // Rule L1: dry-loop dedupe on ALL visited
@@ -654,7 +658,12 @@ export async function* streamEvents<TState extends object, TInput extends object
       // Rule P5/A4: resolve the paused checkpoint node ONCE per iteration,
       // before interrupt logic (both guards compare against this value).
       const cpNode = await checkpointNode<C, TVariables, TGlobal>(opts);
-      const wasPausedAtThisNode = Boolean(cpNode && cpNode.node === node);
+      // Reuse the checkpoint already resolved during checkpoint-first state
+      // hydration. This preserves approval context even when a host supplied
+      // the checkpointer through graph runtime configuration.
+      const wasPausedAtThisNode = Boolean(
+        lastCheckpoint?.node === node || (cpNode && cpNode.node === node),
+      );
 
       // Rule P5: interrupt before executing the node. When resuming from a
       // checkpoint paused at this same node (or explicitly via resumeFrom),
@@ -665,14 +674,17 @@ export async function* streamEvents<TState extends object, TInput extends object
         (opts.resumeFrom === node || wasPausedAtThisNode) &&
         opts.humanResponse !== undefined
       ) {
-        // Route the human answer to a declared state field: prefer "response",
-        // otherwise append it to the first messages field.
+        // Route the human answer only to a declared state field. Graphs that
+        // do not model conversational messages still receive the response via
+        // ctx.answer and must not fail validation from an implicit messages key.
         const shapeKeys = Object.keys(graph.definition.state);
         const humanUpdate: Record<string, JsonValue> = shapeKeys.includes("response")
           ? { response: opts.humanResponse }
-          : { messages: [{ role: "user" as const, content: String(opts.humanResponse) }] };
+          : shapeKeys.includes("messages")
+            ? { messages: [{ role: "user" as const, content: String(opts.humanResponse) }] }
+            : {};
         yield { type: "answer", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { value: opts.humanResponse } };
-        state = mergeState(graph, state, humanUpdate as Partial<TState>);
+        if (Object.keys(humanUpdate).length > 0) state = mergeState(graph, state, humanUpdate as Partial<TState>);
       } else if (
         graph.interruptBefore.has(node) &&
         !wasPausedAtThisNode &&
@@ -707,7 +719,16 @@ export async function* streamEvents<TState extends object, TInput extends object
         return;
       }
 
-      if (nodeSpec?.gate) {
+      // An approval fluent primitive is represented as a node gate. After a
+      // before-node checkpoint is resumed with a human response, that gate was
+      // already satisfied for this execution and must not immediately pause
+      // the same node again.
+      const resumedApprovalExecution = lastCheckpoint?.pendingInterrupt?.mode === "before"
+        && opts.humanResponse !== undefined;
+      const resumeApprovedGate = (wasPausedAtThisNode || (
+        resumedApprovalExecution && nodeSpec?.gate?.name.startsWith("approval:") === true
+      )) && opts.humanResponse !== undefined;
+      if (nodeSpec?.gate && !resumeApprovedGate) {
         const variables = { ...(graph.definition.variables ?? {}), ...(opts.variables ?? {}) } as JsonObject;
         const global = { ...(graph.definition.global ?? {}), ...(opts.global ?? {}) } as JsonObject;
         const decision = await nodeSpec.gate.check(state, { threadId, runId, actor: opts.actor, variables, global });
@@ -781,6 +802,41 @@ export async function* streamEvents<TState extends object, TInput extends object
           const result = await tool.execute(args, { threadId, runId, actor: opts.actor, variables, global });
           eventQueue.push({ type: "tool_end", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { name: tool.name, result } });
           return result;
+        },
+        async runAgent(agent, input) {
+          let tokenIndex = 0;
+          let reasoningIndex = 0;
+          let content = "";
+          const toolCalls: string[] = [];
+          for await (const chunk of agent.stream(input, {
+            signal: opts.signal,
+            threadId,
+            runId,
+            actor: opts.actor,
+            variables,
+            global,
+          })) {
+            if (chunk.type === "token") {
+              content += chunk.value;
+              eventQueue.push({ type: "token", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { value: chunk.value, index: tokenIndex++ } });
+            } else if (chunk.type === "reasoning") {
+              eventQueue.push({ type: "reasoning", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { value: chunk.value, index: reasoningIndex++ } });
+            } else if (chunk.type === "tool_start") {
+              toolCalls.push(chunk.call.name);
+              eventQueue.push({ type: "tool_start", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { name: chunk.call.name, args: chunk.call.arguments as C["toolCall"] } });
+            } else if (chunk.type === "tool_end") {
+              eventQueue.push({ type: "tool_end", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { name: chunk.call.name, result: chunk.result } });
+            } else if (chunk.type === "usage") {
+              eventQueue.push({ type: "usage", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { tier: nodeSpec.binding?.tier ?? agent.name, value: chunk.usage } });
+            } else if (chunk.type === "output") {
+              content = chunk.output.content ?? content;
+              for (const call of chunk.output.toolCalls ?? []) toolCalls.push(call.name);
+            } else if ("error" in chunk) {
+              eventQueue.push({ type: "error", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { error: chunk.error } });
+              throw chunk.error;
+            }
+          }
+          return { agent: agent.name, content, toolCalls };
         },
         async detectIntent<TInput extends object, TIntent extends string>(classifier: IntentClassifier<TInput, TIntent>, value: TInput) {
           const detected = await classifier.classify(value, {
