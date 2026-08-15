@@ -1,7 +1,14 @@
 import type { LLMProvider, ValueSchema } from "../src/types.js";
 import { createAgent } from "../src/agent-api.js";
-import { createModel } from "../src/model-api.js";
+import { createModel, type Model } from "../src/model-api.js";
 import { describe, expect, it } from "vitest";
+
+function expectPairedToolLifecycle(events: readonly { readonly type: string; readonly call?: { readonly id: string } }[]): void {
+  const started = events.flatMap((event) => event.type === "tool_start" && event.call !== undefined ? [event.call.id] : []);
+  const ended = events.flatMap((event) => event.type === "tool_end" && event.call !== undefined ? [event.call.id] : []);
+  expect(started).toHaveLength(1);
+  expect(ended).toEqual(started);
+}
 
 describe("Model structured output", () => {
   it("falls back from unavailable JSON Schema to JSON object without leaking provider behavior to applications", async () => {
@@ -52,9 +59,10 @@ describe("Model structured output", () => {
       }],
     });
 
-    const events = [];
+    const events: { readonly type: string; readonly call?: { readonly id: string } }[] = [];
     for await (const event of agent.stream({ query: "users" })) events.push(event);
     expect(events.some((event) => event.type === "error")).toBe(false);
+    expectPairedToolLifecycle(events);
     expect(events.find((event) => event.type === "output")).toMatchObject({ type: "output", output: { content: "Có 6 users." } });
   });
 
@@ -86,13 +94,49 @@ describe("Model structured output", () => {
       }],
     });
 
-    const events = [];
+    const events: { readonly type: string; readonly call?: { readonly id: string } }[] = [];
     for await (const event of agent.stream({ query: "users" })) events.push(event);
     expect(events.some((event) => event.type === "error")).toBe(false);
+    expectPairedToolLifecycle(events);
     expect(events.find((event) => event.type === "tool_end")).toMatchObject({
       type: "tool_end",
       result: { error: { code: "TOOL_EXECUTION_FAILED", message: "Temporary MCP failure" } },
     });
     expect(events.find((event) => event.type === "output")).toMatchObject({ type: "output", output: { content: "Không thể tra cứu ngay lúc này." } });
+  });
+
+  it("keeps tool failure recovery identical for non-streamed model agents", async () => {
+    let round = 0;
+    const model: Model = {
+      name: "run-tool-error-recovery",
+      async generate(request) {
+        round += 1;
+        if (round === 1) {
+          return { content: "", toolCalls: [{ id: "call-run-failure-1", name: "lookup", arguments: {} }] };
+        }
+        expect(request.messages.at(-1)).toMatchObject({
+          role: "tool",
+          toolCallId: "call-run-failure-1",
+          content: expect.stringContaining("TOOL_EXECUTION_FAILED"),
+        });
+        return { content: "Tra cứu tạm thời chưa khả dụng." };
+      },
+      async *stream() { yield { type: "token" as const, value: "" }; },
+      structured: <TValue extends object>() => ({ generate: async (): Promise<TValue> => ({} as TValue) }),
+    };
+    const agent = createAgent({
+      model,
+      tools: [{
+        spec: { name: "lookup", description: "Look up a value.", parameters: { type: "object", properties: {} } },
+        execute: async () => { throw new Error("Transient tool transport failure"); },
+      }],
+    });
+
+    await expect(agent.run({ query: "users" })).resolves.toMatchObject({
+      output: {
+        content: "Tra cứu tạm thời chưa khả dụng.",
+        toolCalls: [{ id: "call-run-failure-1", name: "lookup" }],
+      },
+    });
   });
 });

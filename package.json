@@ -1,6 +1,6 @@
 {
   "name": "@langgraph-toolkit/core",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Framework-agnostic Langgraph-Toolkit core: typed graph builders, state, execution, streaming, interrupts, models and agents for any backend host.",
   "type": "module",
   "main": "./dist/index.js",
