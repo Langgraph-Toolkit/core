@@ -1,12 +1,9 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
-  defineGraph,
-  node,
-  edge,
-  safety,
   PermissionDeniedError,
   TokenBudgetExceededError,
 } from "../src/index.js";
+import { defineGraph, edge, node, safety } from "../src/legacy.js";
 import {
   GraphRegistry,
   withTokenBudget,

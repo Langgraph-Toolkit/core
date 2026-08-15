@@ -89,6 +89,7 @@ class AsyncEventQueue<T> {
 type NodeExecutionOutcome<TState extends object, C extends GraphContracts> =
   | { readonly kind: "done"; readonly update: Partial<TState> }
   | { readonly kind: "interrupt"; readonly request: InterruptRequest<C["interrupt"]> }
+  | { readonly kind: "route"; readonly target: string; readonly error: Error }
   | { readonly kind: "error"; readonly error: Error };
 
 /**
@@ -105,6 +106,8 @@ export function attachExecutor<
 >(graph: CompiledGraph<TState, TInput, TOutput, C, TVariables, TGlobal>): CompiledGraph<TState, TInput, TOutput, C, TVariables, TGlobal> {
   graph.run = (input, opts) => execute(graph, input, opts);
   graph.stream = (input, opts) => streamEvents(graph, input, opts);
+  graph.invoke = (input, opts) => execute(graph, input, opts);
+  graph.resume = (threadId, response, opts) => execute(graph, {} as TInput, { ...opts, threadId, humanResponse: response });
   return graph;
 }
 
@@ -186,7 +189,7 @@ function applyDefaults<TState extends object, TInput extends object = Partial<TS
     const nextValue = casted?.__reduced ? (value ?? casted.default) : value;
     if (nextValue !== undefined) defaults[key] = nextValue;
   }
-  return defaults as TState;
+  return applyStateOptions(graph, defaults);
 }
 
 function mergeState<TState extends object, TInput extends object = Partial<TState>, TOutput extends object = TState, C extends GraphContracts = DefaultGraphContracts, TVariables extends JsonObject = JsonObject, TGlobal extends JsonObject = JsonObject>(
@@ -212,13 +215,93 @@ function mergeState<TState extends object, TInput extends object = Partial<TStat
       continue;
     }
     const casted = shape as RuntimeShape;
-    if (casted.__reduced && casted.reducer) {
+    const declaredReducer = graph.definition.stateOptions?.reducers?.[key as keyof TState];
+    if (typeof declaredReducer === "function") {
+      const reducer = declaredReducer as unknown as (previous: RuntimeField, next: RuntimeField) => RuntimeField;
+      out[key] = reducer(out[key], value as RuntimeField);
+    } else if (declaredReducer === "append") {
+      const previous = Array.isArray(out[key]) ? out[key] : [];
+      const next = Array.isArray(value) ? value : [value];
+      out[key] = [...previous, ...next] as RuntimeField;
+    } else if (declaredReducer === "merge") {
+      const previous = isRuntimeRecord(out[key]) ? out[key] : {};
+      const next = isRuntimeRecord(value) ? value : {};
+      out[key] = { ...previous, ...next };
+    } else if (casted.__reduced && casted.reducer) {
       out[key] = casted.reducer(out[key] as RuntimeField, value as RuntimeField);
     } else {
       out[key] = value as RuntimeField;
     }
   }
-  return out as TState;
+  return copyFrameworkState(prev, applyStateOptions(graph, out));
+}
+
+const frameworkStateKeys = ["messages", "currentDateTime", "threadId", "runId", "sessionId", "previousSteps", "interrupt", "memory", "context"] as const;
+
+function injectFrameworkState<TState extends object>(state: TState, values: Readonly<Partial<Record<(typeof frameworkStateKeys)[number], RuntimeField>>>): TState {
+  const properties: PropertyDescriptorMap = {};
+  for (const key of frameworkStateKeys) {
+    if (Object.prototype.hasOwnProperty.call(state, key)) continue;
+    properties[key] = {
+      configurable: true,
+      enumerable: false,
+      value: values[key] ?? defaultFrameworkState(key),
+      writable: true,
+    };
+  }
+  Object.defineProperties(state, properties);
+  return state;
+}
+
+function copyFrameworkState<TState extends object>(previous: TState, next: TState): TState {
+  const properties: PropertyDescriptorMap = {};
+  for (const key of frameworkStateKeys) {
+    if (Object.prototype.hasOwnProperty.call(next, key)) continue;
+    const descriptor = Object.getOwnPropertyDescriptor(previous, key);
+    if (descriptor) properties[key] = descriptor;
+  }
+  if (Object.keys(properties).length > 0) Object.defineProperties(next, properties);
+  return next;
+}
+
+function defaultFrameworkState(key: (typeof frameworkStateKeys)[number]): RuntimeField {
+  if (key === "messages" || key === "previousSteps") return [];
+  if (key === "interrupt") return null;
+  if (key === "memory" || key === "context") return {};
+  return "";
+}
+
+function isRuntimeRecord(value: RuntimeField | undefined): value is Record<string, RuntimeField> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function applyStateOptions<TState extends object, TInput extends object = Partial<TState>, TOutput extends object = TState, C extends GraphContracts = DefaultGraphContracts, TVariables extends JsonObject = JsonObject, TGlobal extends JsonObject = JsonObject>(
+  graph: CompiledGraph<TState, TInput, TOutput, C, TVariables, TGlobal>,
+  values: Record<string, RuntimeField>,
+): TState {
+  const options = graph.definition.stateOptions;
+  if (options?.derived) {
+    for (const [key, derive] of Object.entries(options.derived)) {
+      values[key] = derive(values as TState) as RuntimeField;
+    }
+  }
+  if (options?.validate === true && Object.values(values).some((value) => value === undefined)) {
+    throw new GraphRuntimeError("State validation failed because a declared field is undefined.");
+  }
+  if (typeof options?.validate === "function" && !options.validate(values as TState)) {
+    throw new GraphRuntimeError("State validation rejected the current graph state.");
+  }
+  return values as TState;
+}
+
+function diffState<TState extends object>(before: TState, after: TState): Partial<TState> {
+  const previous = before as object as Record<string, RuntimeField>;
+  const next = after as object as Record<string, RuntimeField>;
+  const diff: Record<string, RuntimeField> = {};
+  for (const [key, value] of Object.entries(next)) {
+    if (JSON.stringify(previous[key]) !== JSON.stringify(value)) diff[key] = value;
+  }
+  return diff as Partial<TState>;
 }
 
 function resolveTargets<TState extends object, TInput extends object = Partial<TState>, TOutput extends object = TState, C extends GraphContracts = DefaultGraphContracts, TVariables extends JsonObject = JsonObject, TGlobal extends JsonObject = JsonObject>(
@@ -303,11 +386,11 @@ function resolveRunOptions<
  * Used by Rule A4 to avoid re-interrupting a dangerous node that the human
  * already approved in a previous paused run.
  */
-async function checkpointNode<C extends GraphContracts = DefaultGraphContracts, TVariables extends JsonObject = JsonObject, TGlobal extends JsonObject = JsonObject>(opts?: RunOptions<C, TVariables, TGlobal>): Promise<{ node: string } | undefined> {
+async function checkpointNode<C extends GraphContracts = DefaultGraphContracts, TVariables extends JsonObject = JsonObject, TGlobal extends JsonObject = JsonObject>(opts?: RunOptions<C, TVariables, TGlobal>): Promise<{ node: string; mode?: import("./types.js").InterruptMode } | undefined> {
   const cp = opts?.checkpoint ? loadCheckpointer<object, C, TVariables>(opts) : undefined;
   if (!cp || !opts?.threadId) return undefined;
   const last = await cp.get(opts.threadId);
-  return last ? { node: last.node } : undefined;
+  return last ? { node: last.node, mode: last.pendingInterrupt?.mode } : undefined;
 }
 
 // ---------- Token budget enforcement (Rule A3) ----------
@@ -493,6 +576,12 @@ export async function* streamEvents<TState extends object, TInput extends object
 
   try {
     let state = applyDefaults(graph, input);
+    state = injectFrameworkState(state, {
+      currentDateTime: new Date().toISOString(),
+      threadId,
+      runId,
+      sessionId: threadId,
+    });
     let node = graph.entry;
     let round = 0;
 
@@ -508,8 +597,20 @@ export async function* streamEvents<TState extends object, TInput extends object
     }
 
     const seen = new Set<string>(); // Rule L1: dry-loop dedupe on ALL visited
+    const completedNodes = new Set<string>();
+    const pendingNodes: string[] = [];
+    const loopRounds = new Map<string, number>();
 
-    while (node !== "END") {
+    while (node !== "END" || pendingNodes.length > 0) {
+      if (node === "END") {
+        node = pendingNodes.shift() ?? "END";
+        if (node === "END") break;
+      }
+      const repeatable = graph.loops.some((spec) => spec.node === node);
+      if (completedNodes.has(node) && !repeatable && graph.converge === undefined) {
+        node = pendingNodes.shift() ?? "END";
+        continue;
+      }
       round++;
       if (round > safety.recursionLimit) {
         yield { type: "safety", graph: graph.name, threadId, runId, ts: Date.now(), data: { reason: `recursionLimit ${safety.recursionLimit}` } };
@@ -525,6 +626,23 @@ export async function* streamEvents<TState extends object, TInput extends object
       }
 
       const nodeSpec = graph.definition.nodes[node];
+      const join = graph.joins.find((spec) => spec.target === node);
+      if (join && !join.nodes.every((source) => completedNodes.has(source))) {
+        const waiting = join.nodes.find((source) => !completedNodes.has(source));
+        if (waiting) {
+          node = waiting;
+          continue;
+        }
+      }
+      const loop = graph.loops.find((spec) => spec.node === node);
+      if (loop) {
+        const nextRound = (loopRounds.get(node) ?? 0) + 1;
+        if (nextRound > loop.maxRounds) {
+          yield { type: "safety", graph: graph.name, threadId, runId, node, ts: Date.now(), data: { reason: `loop ${node} exceeded ${loop.maxRounds} rounds` } };
+          throw new SafetyLimitExceededError(`loop ${node} exceeded ${loop.maxRounds} rounds`);
+        }
+        loopRounds.set(node, nextRound);
+      }
       const nodeStep = { id: node, label: nodeSpec?.stepLabel ?? nodeSpec?.label ?? node, kind: "node" as const };
       yield { type: "node_start", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now() };
       const t0 = Date.now();
@@ -560,8 +678,9 @@ export async function* streamEvents<TState extends object, TInput extends object
         !wasPausedAtThisNode &&
         !(opts.resumeFrom === node && opts.humanResponse !== undefined)
       ) {
-        yield { type: "interrupt", graph: graph.name, threadId, runId, node, ts: Date.now(), data: { state } };
-        await persist(graph, cp, threadId, state, node, round, { node, mode: "before" });
+        const request = graph.definition.interruptRequests?.[node];
+        yield { type: "interrupt", graph: graph.name, threadId, runId, node, ts: Date.now(), data: { request, state } };
+        await persist(graph, cp, threadId, state, node, round, { node, mode: "before", request });
         return; // pause; host decides how to surface it
       }
 
@@ -599,6 +718,17 @@ export async function* streamEvents<TState extends object, TInput extends object
           yield { type: "interrupt", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { request: decision.request, state, reason: "gate" } };
           await persist(graph, cp, threadId, state, node, round, { node, mode: "before", request: decision.request });
           return;
+        }
+      }
+
+      for (const guard of graph.definition.guards ?? []) {
+        if (guard.nodes.length > 0 && !guard.nodes.includes(node)) continue;
+        if (!(await guard.check(state))) {
+          throw new PermissionDeniedError(
+            guard.message ?? `Guard denied node "${node}".`,
+            opts.actor,
+            graph.name,
+          );
         }
       }
 
@@ -709,16 +839,75 @@ export async function* streamEvents<TState extends object, TInput extends object
       let nextEvent = readNextEvent();
       const nodeExecution = (async (): Promise<NodeExecutionOutcome<TState, C>> => {
         try {
-          const result = nodeSpec.fn(state, ctx);
-          const update = result instanceof Promise
-            ? await Promise.race(timeoutPromise ? [result, timeoutPromise] : [result])
-            : result;
+          const fanoutField = nodeSpec.fanOut;
+          const runtimeState = state as object as Record<string, RuntimeField>;
+          const collection = fanoutField ? runtimeState[fanoutField] : undefined;
+          const retry = graph.definition.retries?.find((spec) => spec.node === node)
+            ?? graph.definition.retries?.find((spec) => spec.node === undefined);
+          const attempts = retry?.attempts ?? 1;
+          let update: Partial<TState> | undefined;
+          let lastError: unknown;
+          for (let attempt = 1; attempt <= attempts; attempt++) {
+            try {
+              if (!fanoutField || !Array.isArray(collection) || collection.length === 0) {
+                const result = nodeSpec.fn(state, ctx);
+                update = result instanceof Promise
+                  ? await Promise.race(timeoutPromise ? [result, timeoutPromise] : [result])
+                  : result;
+              } else {
+                let fanoutState = state;
+                for (const item of collection) {
+                  const itemState = { ...(state as object), [fanoutField]: [item] } as TState;
+                  const itemResult = nodeSpec.fn(itemState, ctx);
+                  const itemUpdate = itemResult instanceof Promise
+                    ? await Promise.race(timeoutPromise ? [itemResult, timeoutPromise] : [itemResult])
+                    : itemResult;
+                  fanoutState = mergeState(graph, fanoutState, itemUpdate);
+                }
+                update = diffState(state, fanoutState);
+              }
+              break;
+            } catch (error) {
+              if (error instanceof InterruptSignal) throw error;
+              lastError = error;
+              if (attempt >= attempts) break;
+              eventQueue.push({
+                type: "info",
+                graph: graph.name,
+                threadId,
+                runId,
+                node,
+                step: nodeStep,
+                ts: Date.now(),
+                data: { retry: attempt, attempts },
+              });
+              const delay = retry?.backoff === "exponential" ? 10 * 2 ** (attempt - 1) : 10;
+              await new Promise<void>((resolve) => setTimeout(resolve, delay));
+            }
+          }
+          if (update === undefined) {
+            throw lastError ?? new GraphRuntimeError(`Node "${node}" did not produce a state update.`);
+          }
           return { kind: "done", update };
         } catch (err) {
           if (err instanceof InterruptSignal) {
             return { kind: "interrupt", request: err.request as unknown as InterruptRequest<C["interrupt"]> };
           }
           const error = err instanceof Error ? err : new Error(String(err));
+          const fallback = graph.definition.fallbacks?.find((candidate) => candidate.target !== node && candidate.policy !== "rethrow");
+          if (fallback) {
+            eventQueue.push({ type: "info", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { fallback: fallback.target } });
+            return { kind: "route", target: fallback.target, error };
+          }
+          const errorRoute = graph.errorRoutes.find((candidate) => candidate.node === node);
+          if (errorRoute) {
+            const decision = errorRoute.route(state);
+            const target = Array.isArray(decision) ? decision[0] : decision;
+            if (target && errorRoute.targets.includes(target)) {
+              eventQueue.push({ type: "info", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { errorRoute: target } });
+              return { kind: "route", target, error };
+            }
+          }
           eventQueue.push({ type: "error", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { error } });
           return { kind: "error", error };
         }
@@ -757,6 +946,11 @@ export async function* streamEvents<TState extends object, TInput extends object
         await persist(graph, cp, threadId, state, node, round, { node, mode: "before", request: outcome.request });
         return;
       }
+      if (outcome.kind === "route") {
+        yield { type: "edge", graph: graph.name, threadId, runId, node, step: { id: `${node}:${outcome.target}`, label: `Error to ${outcome.target}`, kind: "edge" }, ts: Date.now(), data: { from: node, to: outcome.target } };
+        node = outcome.target;
+        continue;
+      }
       if (outcome.kind === "error") throw outcome.error;
       const update = outcome.update;
 
@@ -775,6 +969,17 @@ export async function* streamEvents<TState extends object, TInput extends object
       };
 
       await persist(graph, cp, threadId, state, node, round);
+      completedNodes.add(node);
+
+      // A post-node pause is persisted after the node has completed. On the
+      // following run, checkpointNode() exposes mode="after" so this node is
+      // not paused a second time for the same checkpoint.
+      if (graph.interruptAfter.has(node) && cpNode?.mode !== "after") {
+        const request = graph.definition.interruptRequests?.[node];
+        yield { type: "interrupt", graph: graph.name, threadId, runId, node, step: nodeStep, ts: Date.now(), data: { request, state, reason: "after" } };
+        await persist(graph, cp, threadId, state, node, round, { node, mode: "after", request });
+        return;
+      }
 
       const targets = resolveTargets(graph, node, state);
       // Rule L1 dry-loop: if the only next target was already visited and state did not change, stop
@@ -795,9 +1000,9 @@ export async function* streamEvents<TState extends object, TInput extends object
         yield { type: "edge", graph: graph.name, threadId, runId, node, step: { id: `${node}:${target}`, label: edge?.label ?? `${node} to ${target}`, kind: "edge" }, ts: Date.now(), data: { from: node, to: target } };
         node = target;
       } else {
-        // Multiple successors: fan-out. First target continues the loop;
-        // fanOut declared on the node spec is handled by the node emitting Sends.
-        node = targets[0];
+        const orderedTargets = [...targets.filter((target) => target !== "END"), ...(targets.includes("END") ? ["END"] : [])];
+        node = orderedTargets.shift() ?? "END";
+        pendingNodes.push(...orderedTargets.filter((target) => !pendingNodes.includes(target)));
       }
     }
 

@@ -1,39 +1,62 @@
 /**
  * @langgraph-toolkit/core
  *
- * The framework-agnostic graph vocabulary. This root barrel is deliberately
- * small: optional runtime registries, queues, providers, policies, and test
- * harnesses live behind explicit subpaths or in Community packages.
+ * The framework-agnostic graph vocabulary. This root barrel contains the
+ * canonical 0.2 API; the former definition DSL is available from `/legacy`.
  *
  * @example
  * ```ts
- * import { buildGraph, defineGraph, edge, node, streamEvents } from "@langgraph-toolkit/core";
+ * import { createWorkflow, createState, createNode } from "@langgraph-toolkit/core";
  * ```
  */
 
-/** Define a typed graph workflow. */
+/** Core-owned zero-config capability facades. */
+export { autoModel, autoMemory, autoCache, autoGuardrails, autoReliability, autoObservability, autoEvaluation } from "./auto.js";
+export type { AutoModelOptions } from "./auto.js";
+
+/** Canonical inference-first graph facades from the target API. */
 export {
-  defineGraph,
-  defineState,
-  node,
-  edge,
-  conditional,
-  converge,
-  safety,
-  tier,
-  stepLabel,
-  schema,
-  gate,
-  tool,
-  intent,
-  intentAnalyzer,
-} from "./defineGraph.js";
+  createGraph,
+  createWorkflow,
+  createState,
+  createTool,
+  createNode,
+  createEdge,
+  createRoute,
+  createSubgraph,
+  composeWorkflows,
+  createSchema,
+  createSafety,
+  createStepLabel,
+  createRisk,
+  createTier,
+} from "./graph-api.js";
 
-/** Compile and attach the default graph executor in one call. */
-export { buildGraph, streamEvents } from "./executor.js";
-
-/** Typed state helpers and cooperative cancellation. */
-export { messagesValue, reducedValue, isReducedField, createCancellationSource } from "./types.js";
+/** Graph builder contracts for inference-first workflow composition. */
+export type {
+  GraphBuilder,
+  GraphOptions,
+  StateFieldMap,
+  RouteDefinition,
+  DynamicFanoutRoute,
+  LoopRoute,
+  ErrorRoute,
+  StateReducer,
+  CompileOptions,
+  NodeOptions,
+  WorkflowOptions,
+  FluentCallable,
+  ApprovalOptions,
+  CheckpointSource,
+  RetryOptions,
+  FallbackOptions,
+  ParallelOptions,
+  MapOptions,
+  ReduceOptions,
+  RouteMap,
+  InterruptOptions,
+  TransactionOptions,
+} from "./graph-api.js";
 
 /** Stable graph and execution errors. */
 export {
@@ -41,6 +64,7 @@ export {
   GraphDefinitionError,
   CompileRuleViolationError,
   GraphRuntimeError,
+  ModelProviderNotConfiguredError,
   SafetyLimitExceededError,
   CancelledError,
   PermissionDeniedError,
@@ -59,6 +83,9 @@ export type {
   StateSchema,
   StateField,
   StateFieldInput,
+  StateOptions,
+  StateValueReducer,
+  FrameworkState,
   ReducedField,
   MessagesField,
   StateOf,
@@ -113,3 +140,112 @@ export type {
   TokenUsage,
   ReasoningEffort,
 } from "./types.js";
+
+/** Model facades and multimodal contracts. */
+export {
+  createModel,
+  createEmbeddingModel,
+  createSpeechModel,
+  modelUsage,
+} from "./model-api.js";
+
+/** Generic agent, supervisor, bus, memory and context facades. */
+export {
+  createAgent,
+  createSupervisor,
+  createAgentBus,
+  createMemory,
+  createContextManager,
+} from "./agent-api.js";
+
+/** Model contracts. */
+export type {
+  Model,
+  ModelOptions,
+  ModelRequest,
+  ModelResponse,
+  ModelChunk,
+  StructuredModel,
+  EmbeddingModel,
+  EmbeddingModelOptions,
+  EmbeddingOptions,
+  EmbeddingResult,
+  SpeechModel,
+  SpeechModelOptions,
+  SpeechInput,
+  SpeechText,
+  SpeechOptions,
+  SpeechResult,
+  SpeechAudio,
+} from "./model-api.js";
+
+/** Agent, supervisor, bus, memory and context contracts. */
+export type {
+  Agent,
+  AgentOptions,
+  AgentResult,
+  AgentEvent,
+  AgentRunOptions,
+  Supervisor,
+  SupervisorOptions,
+  SupervisorPlan,
+  SupervisorTask,
+  AgentBus,
+  AgentBusOptions,
+  AgentMessage,
+  AgentSubscriber,
+  Memory,
+  MemoryOptions,
+  MemoryRecord,
+  ContextManager,
+  ContextOptions,
+} from "./agent-api.js";
+
+/** Reasoning, intent planning and reflection contracts. */
+export { createReasoning } from "./reasoning-api.js";
+export type {
+  Reasoning,
+  ReasoningOptions,
+  ReasoningRunOptions,
+  ReasoningTask,
+  ReasoningDependency,
+  ReasoningPlan,
+  ReasoningResult,
+  AdvancedReasoningOptions,
+  DependencyGraph,
+} from "./reasoning-api.js";
+export { createReflection, reflectionCheck } from "./reflection-api.js";
+export type { Reflection, ReflectionOptions, ReflectionCandidate, ReflectionResult, ReflectionCheck } from "./reflection-api.js";
+
+/** Guardrails and risk classification contracts. */
+export { createGuardrails } from "./safety-api.js";
+export type { Guardrails, GuardrailOptions, GuardrailCheck, GuardrailResult, RiskLevel } from "./safety-api.js";
+
+/** Reliability, cache, streaming, observability, evaluation and execution facades. */
+export { createReliability, createCache, createStreaming, createObservability, createEvaluation, createExecutionRuntime } from "./runtime-features.js";
+export type {
+  Reliability,
+  ReliabilityOptions,
+  RecoveryResult,
+  TransactionStep,
+  Cache,
+  CacheOptions,
+  CacheSetOptions,
+  Streaming,
+  StreamingOptions,
+  Observability,
+  ObservabilityOptions,
+  TraceSpan,
+  TraceRecord,
+  Evaluation,
+  EvaluationOptions,
+  EvaluationCase,
+  EvaluationResult,
+  EvaluationReport,
+  ExecutionRuntime,
+  ExecutionRuntimeOptions,
+} from "./runtime-features.js";
+
+/** Tool registry and multi-tool orchestration contracts. */
+export { createToolRegistry } from "./tool-api.js";
+export type { ToolRegistry, ToolPlanStep, ToolApproval } from "./tool-api.js";

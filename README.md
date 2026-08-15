@@ -1,170 +1,175 @@
 # @langgraph-toolkit/core
 
-**Configure the graph once. Run the same typed resource anywhere.** Core is a framework-agnostic TypeScript runtime for workflows, agents, background jobs, data pipelines, approval flows, classifiers, and any process that benefits from explicit state transitions. It does not import Express, Fastify, NestJS, StruxJS, MCP, or a model vendor.
+**Define a typed workflow once. Run the same resource in a worker, CLI process, test harness, or supported backend adapter.** Core is the framework-agnostic runtime for workflows, agents, background jobs, data pipelines, approval flows, classifiers, and other stateful processes with observable transitions. It does not require a web framework, MCP transport, checkpointer driver, or model vendor.
 
-## Install the smallest useful surface
+## Install
 
 ```bash
 npm install @langgraph-toolkit/core
 ```
 
-Core is independently installable. Add an MCP package, provider package, checkpointer, or framework adapter only when the resource needs that boundary.
+Start with Core only. Add another package only when the resource needs that boundary: `@langgraph-toolkit/mcp` for MCP servers, `@langgraph-toolkit/community` for provider integrations and RAG, `@langgraph-toolkit/adapter-checkpointers` for durable state, or a host adapter for HTTP framework lifecycle.
 
-## The zero-config path
+## Quick start
 
-The normal path declares a state descriptor and a named node object. Core infers the state shape and initial values from `defineState`, accepts plain functions as nodes, creates linear edges when `edges` is omitted, and keeps runtime defaults on the graph. `buildGraph` compiles and attaches the executor in one call, so a run receives business input instead of repeating infrastructure configuration.
+`createWorkflow(name, options?)` is the canonical application facade. It infers state from one object, applies framework-provided runtime fields, accepts plain node functions, and compiles to a runnable workflow.
 
 ```ts
 import {
-  buildGraph,
-  defineGraph,
-  defineState,
+  createState,
+  createWorkflow,
 } from "@langgraph-toolkit/core";
 
-const state = defineState({
+const state = createState({
   question: "",
   answer: "",
 });
 
-const graph = buildGraph(
-  defineGraph({
-    name: "database-chat",
-    state,
-    nodes: {
-      lookup: async (current) => ({
-        answer: `Received: ${current.question}`,
-      }),
-    },
-  }),
-);
+const workflow = createWorkflow("typed-answer", { state })
+  .node("answer", current => ({
+    answer: `Received: ${current.question}`,
+  }))
+  .start("answer")
+  .compile();
 
-const result = await graph.run({ question: "How many users are there?" });
+const result = await workflow.invoke({
+  question: "How many users are there?",
+});
+
 console.log(result.state.answer);
 ```
 
-The smallest valid graph has no `stateDefaults`, no `never`, no mandatory per-run actor, policy, checkpoint, or provider object, and no framework-specific host code.
-
-## Reuse inferred contracts instead of repeating state types
-
-When a graph grows beyond a single inline node, derive its state type from the descriptor. `StateOf` keeps node input and output code synchronized with the descriptor, so a field is declared once.
+For the smallest possible workflow, options are optional. Core injects runtime fields such as `threadId`, `runId`, `sessionId`, `messages`, `previousSteps`, `interrupt`, `memory`, and `context` when execution begins. A developer does not need a duplicate `stateDefaults` object or a required actor, policy, checkpoint, or provider object for every invocation.
 
 ```ts
-import { StateOf, defineState } from "@langgraph-toolkit/core";
+import { createWorkflow } from "@langgraph-toolkit/core";
 
-const chatState = defineState({ question: "", context: "", answer: "" });
-type ChatState = StateOf<typeof chatState>;
+const health = createWorkflow("health")
+  .node("ready", () => ({ status: "ready" }))
+  .start("ready")
+  .compile();
 
-const answer = async (current: ChatState): Promise<Partial<ChatState>> => ({
-  answer: `Question: ${current.question}\nContext: ${current.context}`,
-});
+const result = await health.invoke({});
 ```
 
-For model-backed nodes, `streamChatNode` owns the repeated thinking, token, reasoning, usage, cancellation, and final-answer event handling. It is an optional runtime helper, so import it from `@langgraph-toolkit/core/runtime`. Use a plain `answer` function only when the graph deliberately needs custom model orchestration.
+## State behavior without a second configuration layer
+
+Pass state behavior to `createState(fields, options?)`. Reducers define merge behavior, derived fields run after each update, and validation protects invalid transitions. History, snapshots, and recovery metadata stay with the state descriptor for compatible executors and checkpointers.
 
 ```ts
-import { streamChatNode } from "@langgraph-toolkit/core/runtime";
+import {
+  createState,
+  createWorkflow,
+} from "@langgraph-toolkit/core";
 
-const answer = streamChatNode({
-  system: "Answer only from the supplied context.",
-  messages: (current: ChatState) => [
-    { role: "user", content: `${current.question}\n\n${current.context}` },
-  ],
-  select: (current: ChatState, text: string) => ({ answer: text }),
-});
-```
-
-## Configure once, override only when needed
-
-Graph-level runtime options are inherited by `run` and `stream`. Optional run overrides remain available for request-specific values such as a thread identifier or a human answer.
-
-| Concern | Default location | Per-run override |
-|---|---|---|
-| State shape and initial values | `defineState({...})` | No repeated declaration |
-| Node order | `nodes: { ... }` | Use explicit `edges` only for branches or labels |
-| Checkpoint | `defineGraph({ runtime: { checkpoint } })` | Override only for a special execution |
-| Actor and permission | Graph runtime or host context | Override for a request when required |
-| Provider and model tier | Community or application runtime | Override for an intentional routing decision |
-| Variables and global values | `variables` and `global` on the graph | Supply request-specific values when needed |
-
-```ts
-const graph = buildGraph(
-  defineGraph({
-    name: "database-chat",
-    state,
-    nodes: {
-      lookup,
-      answer,
-    },
-    runtime: {
-      variables: { source: "database-chat" },
-    },
-  }),
-);
-
-const result = await graph.run({ question: "count users" });
-const events = graph.stream({ question: "count users" });
-const resumed = await graph.run(
-  { question: "count users" },
-  { threadId: "conversation-1", humanResponse: { approved: true, note: null } },
-);
-```
-
-## Start small, add explicit structure only where it adds meaning
-
-The inferred path is not a reduced API. It is a short form of the same typed contracts. Add named node bindings when a node needs a model tier, risk classification, tool list, intent analyzer, or step label. Add explicit edges when the workflow branches, loops, or needs labels in the stream.
-
-```ts
-import { conditional, defineGraph, edge, gate, node } from "@langgraph-toolkit/core";
-
-const approval = gate("database-answer-approval", async (current) =>
-  current.answer === undefined
-    ? { kind: "deny", reason: "No answer exists to approve." }
-    : { kind: "allow" },
-);
-
-const definition = defineGraph({
-  name: "approval-flow",
-  state,
-  nodes: {
-    draft: node(draftNode, { tier: "cheap", stepLabel: "Draft answer" }),
-    approve: node(approvalNode, { gate: approval, stepLabel: "Review answer" }),
-    respond: respondNode,
+const state = createState(
+  {
+    items: [] as string[],
+    total: 0,
   },
-  edges: [
-    edge("draft", "approve", "prepare"),
-    conditional("approve", routeAfterApproval, ["respond", "END"]),
-  ],
-});
+  {
+    reducers: {
+      items: (current, incoming) => [...current, ...incoming],
+    },
+    derived: {
+      total: current => current.items.length,
+    },
+    validate: true,
+    history: true,
+    snapshots: true,
+    recovery: true,
+  },
+);
 
-const approvalGraph = buildGraph(definition);
+const workflow = createWorkflow("collect-items", { state })
+  .node("collect", () => ({ items: ["one", "two"] }))
+  .start("collect")
+  .compile();
 ```
 
-## One graph, many backend hosts
+## Compile once, invoke and resume deliberately
 
-Core owns the graph contract, not the transport lifecycle. The same compiled resource can be mounted by an Express router, Fastify plugin, NestJS module, StruxJS provider, a worker, or a custom HTTP server.
+`.compile()` is the canonical lifecycle boundary. It validates the topology and returns a runnable compiled workflow. `.invoke()` executes it; `.resume()` continues a matching interrupted thread. `.build()` and `.run()` remain compatibility aliases for existing integrations and are not the recommended onboarding path.
 
-| Layer | Owns | Does not own |
-|---|---|---|
-| Core | State, nodes, edges, gates, interrupts, variables, runtime contracts, typed events | HTTP server or vendor SDK |
-| MCP | Gateway, discovery, tools, async credentials, resource errors | Framework lifecycle or business graph semantics |
-| Community | Providers, model inference, built-in use cases, contributor integrations | Core execution or HTTP routing |
-| Adapter | Framework registration, request parsing, streaming, response lifecycle | Database schema or prompt policy |
-| Checkpointers | Persistence drivers for SQLite, PostgreSQL, MySQL, MongoDB, and Redis | Graph topology or actor decisions |
+```ts
+const workflow = createWorkflow("review", {
+  state: createState({ draft: "", approved: false }),
+})
+  .node("draft", () => ({ draft: "Prepared for review" }))
+  .start("draft")
+  .interrupt({ after: ["draft"] })
+  .compile();
 
-This boundary is the main portability guarantee. A host can change without moving business workflow code into a framework-specific folder.
+const first = await workflow.invoke({}, { threadId: "review-42" });
 
-## Public building blocks
+if (first.interrupted) {
+  const resumed = await workflow.resume("review-42", {
+    approved: true,
+  });
+  console.log(resumed.state.draft);
+}
+```
 
-| Area | Main API | Why it exists |
-|---|---|---|
-| State | `defineState`, `reducedValue`, `messagesValue` | Infer state shape and merge behavior |
-| Graph | `defineGraph`, `buildGraph` | Define, validate, and create a runnable graph |
-| Runtime control | `compile`, `GraphRegistry`, `createToolkitRuntime` from `@langgraph-toolkit/core/runtime` | Opt into explicit compilation, registries, and runtime composition |
-| Execution | `graph.run`, `graph.stream` | Run or stream typed step, tool, token, thinking, and interrupt events |
-| Control flow | `edge`, `conditional`, `gate`, `interruptBefore` | Express branches, approvals, and human-in-the-loop behavior |
-| Safety | actors, policies, tiers, token budgets, risk harness | Bound permission and cost decisions |
-| Persistence | `Checkpointer` contract | Attach a database without coupling core to a driver |
-| Extensibility | model, tool, intent, and queue contracts | Add providers and use cases without changing the runtime |
+Node labels and edge labels become stream metadata. Use `workflow.stream(input, options)` when a host needs steps, token chunks, reasoning, tool activity, intent, interrupts, or completion events.
+
+## Scale from a linear workflow to explicit topology
+
+The fluent surface is additive. Start with nodes and a linear path, then add the controls that express a real requirement.
+
+| Need | Canonical control |
+| --- | --- |
+| Named transition with UI-visible progress | `.edge(from, to, label?)` |
+| Bounded conditional branch | `.conditional()` or `.route()` |
+| Independent work and a convergence barrier | `.parallel()`, `.join()` |
+| Collection work | `.map()`, `.reduce()` |
+| Review, policy, or human pause | `.guard()`, `.approval()`, `.interrupt()` |
+| Recovery and resilience | `.retry()`, `.fallback()`, `.transaction()` |
+| Reusable capabilities | `.subgraph()`, `.rag()`, `.supervisor()`, `.remember()`, `.evaluate()` |
+| Durable continuation | `.checkpoint()` |
+
+`createGraph(options)` exposes the same builder contract for advanced workflow topology. It is the right choice when named entry points, routes, joins, fan-out, loops, or graph composition are central to the resource design.
+
+```ts
+import {
+  createGraph,
+  createState,
+} from "@langgraph-toolkit/core";
+
+const graph = createGraph({
+  name: "two-step",
+  state: createState({ value: "", result: "" }),
+})
+  .node("normalize", current => ({ value: current.value.trim() }))
+  .node("finish", current => ({ result: current.value.toUpperCase() }))
+  .start("normalize")
+  .edge("normalize", "finish", "normalized")
+  .compile();
+```
+
+## Package boundaries
+
+| Package | Owns | Use it when |
+| --- | --- | --- |
+| `@langgraph-toolkit/core` | State, workflow topology, nodes, edges, streams, interrupts, schemas, tools, intent, gates, generic model contracts | Every workflow |
+| `@langgraph-toolkit/mcp` | MCP declarations, async credentials, discovery, typed tools, server lifecycle | A graph needs MCP tools, resources, or prompts |
+| `@langgraph-toolkit/community` | Provider integrations, model pools, RAG and community use cases | A workflow needs a contributed provider or retrieval integration |
+| `@langgraph-toolkit/adapter-checkpointers` | Redis and persistence implementations, history, restore and fork | State must survive the process lifecycle |
+| Framework adapters | Request parsing, streaming responses, dependency lifecycle | Mounting a compiled workflow in Express, Fastify, NestJS, or StruxJS |
+
+Core owns `autoModel`, `autoMemory`, `autoCache`, `autoGuardrails`, `autoReliability`, `autoObservability`, and `autoEvaluation`. The persistence adapter owns `autoCheckpoint`; Community owns `autoRag`. This separation keeps a base Core install independent of provider and storage dependencies.
+
+## Advanced and migration imports
+
+The Core root contains the canonical 0.2.0 facade. Exact definition-style primitives are intentionally separate:
+
+| Import | Purpose |
+| --- | --- |
+| `@langgraph-toolkit/core` | Canonical `create*` facade and public contracts |
+| `@langgraph-toolkit/core/low-level` | Explicit `defineGraph`, `defineState`, `node`, `edge`, `conditional`, and `buildGraph` primitives |
+| `@langgraph-toolkit/core/legacy` | Compatibility alias for an incremental migration from the older DSL |
+| `@langgraph-toolkit/core/runtime` | Optional execution and streaming helpers |
+
+Do not import low-level DSL helpers from the Core root in new application code. This keeps common code short while retaining exact primitives for advanced integrations.
 
 ## Development
 
@@ -174,7 +179,7 @@ npm run build
 npm test
 ```
 
-Contributors should add one focused regression test for each public contract change. Keep graph code portable, keep host code thin, and prefer an inferred default over a new required option.
+Contributors should add a focused regression test for every public behavior change. Preserve framework portability, prefer inference over a new required option, and keep host-specific lifecycle code inside the relevant adapter.
 
 ## License
 

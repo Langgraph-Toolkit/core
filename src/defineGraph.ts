@@ -33,6 +33,7 @@ import type {
   StateField,
   StateSchema,
   StateFieldInput,
+  StateOptions,
   TierAlias,
   ValueSchema,
   VerifySpec,
@@ -52,6 +53,8 @@ export interface DefineGraphOptions<
   state: GraphDefinition<TState, TInput, TOutput, C, TVariables, TGlobal>["state"] | StateDescriptor<TState>;
   /** @deprecated Prefer initial values declared through `defineState`. */
   stateDefaults?: GraphDefinition<TState, TInput, TOutput, C, TVariables, TGlobal>["stateDefaults"];
+  /** State behavior inferred from a descriptor or explicitly supplied by an advanced caller. */
+  stateOptions?: StateOptions<TState>;
   nodes: Record<string, NodeLike<TState, C, TVariables, TGlobal>>;
   entry?: string;
   edges?: GraphDefinition<TState, TInput, TOutput, C, TVariables, TGlobal>["edges"];
@@ -106,6 +109,7 @@ export function defineGraph<
     name: opts.name,
     state: stateDescriptor?.fields ?? (opts.state as StateSchema<TState>),
     stateDefaults: opts.stateDefaults ?? stateDescriptor?.defaults,
+    stateOptions: opts.stateOptions ?? stateDescriptor?.options,
     nodes: normalizeNodes(opts.nodes),
     entry,
     edges: opts.edges ?? linearEdges(Object.keys(opts.nodes)),

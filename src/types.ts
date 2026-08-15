@@ -16,6 +16,12 @@ export class CompileRuleViolationError extends GraphDefinitionError {
 export class GraphRuntimeError extends ToolkitError {
   constructor(message: string, public cause?: Error) { super(message, "GRAPH_RUNTIME_ERROR"); this.name = "GraphRuntimeError"; }
 }
+export class ModelProviderNotConfiguredError extends GraphRuntimeError {
+  constructor() {
+    super("No model provider is configured. Register a provider or pass one to autoModel().");
+    this.name = "ModelProviderNotConfiguredError";
+  }
+}
 export class SafetyLimitExceededError extends GraphRuntimeError {
   constructor(limit: string) { super(`Safety limit exceeded: ${limit}`, new Error(limit)); this.name = "SafetyLimitExceededError"; }
 }
@@ -43,6 +49,31 @@ export interface StateDescriptor<TState extends object> {
   readonly __stateDescriptor: true;
   readonly fields: StateSchema<TState>;
   readonly defaults: Partial<TState>;
+  readonly options?: StateOptions<TState>;
+}
+/** Reducer modes supported by inference-first state declarations. */
+export type StateValueReducer<TValue> = "append" | "merge" | ((previous: TValue, next: TValue) => TValue);
+/** Declarative behavior attached to a state descriptor. */
+export interface StateOptions<TState extends object> {
+  readonly immutable?: boolean;
+  readonly reducers?: Readonly<Partial<{ [K in keyof TState]: StateValueReducer<TState[K]> }>>;
+  readonly derived?: Readonly<Record<string, (state: Readonly<TState>) => JsonValue>>;
+  readonly validate?: boolean | ((state: Readonly<TState>) => boolean);
+  readonly history?: boolean;
+  readonly snapshots?: boolean;
+  readonly recovery?: boolean;
+}
+/** State fields injected by the execution runtime for every createState graph. */
+export interface FrameworkState {
+  readonly messages: readonly ChatMessage[];
+  readonly currentDateTime: string;
+  readonly threadId: string;
+  readonly runId: string;
+  readonly sessionId: string;
+  readonly previousSteps: readonly StepDescriptor[];
+  readonly interrupt: JsonValue;
+  readonly memory: JsonObject;
+  readonly context: JsonObject;
 }
 /** Infer the runtime state object from a state descriptor without repeating the state interface. */
 export type StateOf<TDescriptor> = TDescriptor extends StateDescriptor<infer TState> ? TState : JsonObject;
@@ -200,6 +231,59 @@ export type ConditionalRouteFn<TState extends object> = (state: TState) => Route
 export interface EdgeSpec<TState extends object = object> { readonly from: string; readonly to: string; readonly label?: string; }
 export interface ConditionalEdgeSpec<TState extends object = object> { readonly from: string; readonly fn: ConditionalRouteFn<TState>; readonly targets: readonly string[]; readonly label?: string; }
 
+/** A collection field processed by a node as bounded parallel work. */
+export interface FanoutSpec<TState extends object> {
+  readonly node: string;
+  readonly field: keyof TState & string;
+}
+
+/** A barrier that waits for the declared upstream nodes before continuing. */
+export interface JoinSpec {
+  readonly nodes: readonly string[];
+  readonly target: string;
+}
+
+/** A state reducer registered by a graph builder. */
+export interface ReductionSpec<TState extends object> {
+  readonly field: keyof TState & string;
+  readonly reducer: (state: TState) => Partial<TState>;
+}
+
+/** A bounded conditional loop registered by a graph builder. */
+export interface LoopSpec<TState extends object> {
+  readonly node: string;
+  readonly route: ConditionalRouteFn<TState>;
+  readonly targets: readonly string[];
+  readonly maxRounds: number;
+}
+
+/** A bounded route used when a node execution fails. */
+export interface ErrorRouteSpec<TState extends object> {
+  readonly node: string;
+  readonly route: ConditionalRouteFn<TState>;
+  readonly targets: readonly string[];
+}
+
+/** Retry policy applied to a single node or every node in a workflow. */
+export interface RetrySpec {
+  readonly node?: string;
+  readonly attempts: number;
+  readonly backoff: "fixed" | "exponential";
+}
+
+/** A recovery node selected when execution of another node fails. */
+export interface FallbackSpec {
+  readonly target: string;
+  readonly policy: "recover" | "return" | "rethrow";
+}
+
+/** A workflow-level predicate evaluated before selected nodes execute. */
+export interface GuardSpec<TState extends object> {
+  readonly nodes: readonly string[];
+  readonly check: (state: TState) => boolean | Promise<boolean>;
+  readonly message?: string;
+}
+
 export interface ConvergeSpec<TState extends object> { readonly on: keyof TState & string; readonly maxRounds: number; }
 export interface SafetySpec { readonly recursionLimit: number; readonly timeoutMs?: number; readonly maxTokensPerNode?: number; }
 export type InterruptMode = "before" | "after";
@@ -222,14 +306,30 @@ export interface GraphDefinition<TState extends object, TInput extends object = 
   readonly state: StateSchema<TState>;
   /** @deprecated Define initial values directly in `defineState`; retained for compatibility. */
   readonly stateDefaults?: Partial<TState>;
+  /** Declarative state behavior retained from createState(fields, options). */
+  readonly stateOptions?: StateOptions<TState>;
   readonly schemas?: GraphSchemas<TInput, TOutput, C>;
   readonly nodes: Readonly<Record<string, NodeSpec<TState, C, TVariables, TGlobal>>>;
   readonly edges: readonly (EdgeSpec<TState> | ConditionalEdgeSpec<TState>)[];
   readonly entry: string;
   readonly verify?: { readonly nodes: readonly string[]; readonly fns?: readonly VerifierFn<TState>[] };
   readonly converge?: ConvergeSpec<TState>;
+  readonly fanouts?: readonly FanoutSpec<TState>[];
+  readonly joins?: readonly JoinSpec[];
+  readonly reductions?: readonly ReductionSpec<TState>[];
+  readonly loops?: readonly LoopSpec<TState>[];
+  readonly errorRoutes?: readonly ErrorRouteSpec<TState>[];
+  /** Declarative retry policies lowered from fluent `.retry()`. */
+  readonly retries?: readonly RetrySpec[];
+  /** Declarative recovery targets lowered from fluent `.fallback()`. */
+  readonly fallbacks?: readonly FallbackSpec[];
+  /** Declarative execution predicates lowered from fluent `.guard()`. */
+  readonly guards?: readonly GuardSpec<TState>[];
   readonly safety: SafetySpec;
   readonly interruptBefore?: readonly string[];
+  readonly interruptAfter?: readonly string[];
+  /** Human-in-the-loop requests keyed by their lifecycle target node. */
+  readonly interruptRequests?: Readonly<Record<string, InterruptRequest<C["interrupt"]>>>;
   readonly log?: boolean;
   readonly variables?: Partial<TVariables>;
   readonly global?: Partial<TGlobal>;
@@ -243,9 +343,17 @@ export interface CompiledGraph<TState extends object, TInput extends object = Pa
   readonly entry: string;
   readonly terminals: Set<string>;
   readonly converge?: ConvergeSpec<TState>;
+  readonly fanouts: ReadonlyMap<string, FanoutSpec<TState>>;
+  readonly joins: readonly JoinSpec[];
+  readonly reductions: readonly ReductionSpec<TState>[];
+  readonly loops: readonly LoopSpec<TState>[];
+  readonly errorRoutes: readonly ErrorRouteSpec<TState>[];
   readonly safety: SafetySpec;
   readonly interruptBefore: Set<string>;
+  readonly interruptAfter: Set<string>;
   run(input: TInput, opts?: RunOptions<C, TVariables, TGlobal>): Promise<RunResult<TState, TOutput, C["interrupt"], TVariables>>;
+  invoke(input: TInput, opts?: RunOptions<C, TVariables, TGlobal>): Promise<RunResult<TState, TOutput, C["interrupt"], TVariables>>;
+  resume(threadId: string, response: C["answer"], opts?: Omit<RunOptions<C, TVariables, TGlobal>, "threadId" | "humanResponse">): Promise<RunResult<TState, TOutput, C["interrupt"], TVariables>>;
   stream(input: TInput, opts?: RunOptions<C, TVariables, TGlobal>): AsyncIterable<StepEvent<TState, C>>;
 }
 

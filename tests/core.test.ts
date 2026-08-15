@@ -1,22 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-	defineGraph,
-	defineState,
-  node,
-  edge,
-  conditional,
-	  converge,
-	safety,
-	schema,
-	buildGraph,
-	messagesValue,
-	reducedValue,
-	isReducedField,
-	createCancellationSource,
   CompileRuleViolationError,
   GraphRuntimeError,
   SafetyLimitExceededError,
-		} from "../src/index.js";
+} from "../src/index.js";
+import {
+  buildGraph,
+  conditional,
+  converge,
+  createCancellationSource,
+  defineGraph,
+  defineState,
+  edge,
+  isReducedField,
+  messagesValue,
+  node,
+  reducedValue,
+  safety,
+  schema,
+} from "../src/legacy.js";
 import { compile, attachExecutor, GraphRegistry } from "../src/runtime-barrel.js";
 import { dispatchToQueue, registerQueueAdapter } from "../src/queue-barrel.js";
 import { MemoryCheckpointer, codeAnchor, runVerifiers, hasAnchor } from "../src/testing-barrel.js";

@@ -1,7 +1,7 @@
 {
   "name": "@langgraph-toolkit/core",
   "version": "0.2.0",
-  "description": "Framework-agnostic LangGraph toolkit: defineGraph DSL, compile-time rule enforcement, run, stream, checkpointers and model registry. Works with any backend host.",
+  "description": "Framework-agnostic Langgraph-Toolkit core: typed graph builders, state, execution, streaming, interrupts, models and agents for any backend host.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -9,6 +9,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./legacy": {
+      "types": "./dist/legacy.d.ts",
+      "import": "./dist/legacy.js"
+    },
+    "./low-level": {
+      "types": "./dist/low-level.d.ts",
+      "import": "./dist/low-level.js"
     },
     "./runtime": {
       "types": "./dist/runtime-barrel.d.ts",

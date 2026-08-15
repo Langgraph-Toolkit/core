@@ -93,6 +93,7 @@ export function compile<
   if (definition.converge) {
     validateConverge(definition.converge, definition);
   }
+  validateControls(definition);
 
   return {
     definition,
@@ -101,11 +102,74 @@ export function compile<
     entry: definition.entry,
     terminals,
     converge: definition.converge,
+    fanouts: new Map((definition.fanouts ?? []).map((spec) => [spec.node, spec] as const)),
+    joins: definition.joins ?? [],
+    reductions: definition.reductions ?? [],
+    loops: definition.loops ?? [],
+    errorRoutes: definition.errorRoutes ?? [],
     safety: definition.safety,
     interruptBefore: new Set(definition.interruptBefore ?? []),
+    interruptAfter: new Set(definition.interruptAfter ?? []),
     run: () => { throw new GraphDefinitionError("Compiled graph is not runnable until buildGraph() or attachExecutor() is called."); },
     stream: () => { throw new GraphDefinitionError("Compiled graph is not runnable until buildGraph() or attachExecutor() is called."); },
+    invoke: () => { throw new GraphDefinitionError("Compiled graph is not runnable until buildGraph() or attachExecutor() is called."); },
+    resume: () => { throw new GraphDefinitionError("Compiled graph is not runnable until buildGraph() or attachExecutor() is called."); },
   };
+}
+
+function validateControls<
+  TState extends object,
+  TInput extends object,
+  TOutput extends object,
+  C extends GraphContracts,
+  TVariables extends JsonObject,
+  TGlobal extends JsonObject,
+>(definition: GraphDefinition<TState, TInput, TOutput, C, TVariables, TGlobal>): void {
+  const nodeNames = new Set(Object.keys(definition.nodes));
+  const stateKeys = new Set(Object.keys(definition.state));
+
+  for (const spec of definition.fanouts ?? []) {
+    if (!nodeNames.has(spec.node)) throw new GraphDefinitionError(`Fanout node "${spec.node}" is not defined.`);
+    if (!stateKeys.has(spec.field)) throw new GraphDefinitionError(`Fanout field "${spec.field}" is not in the state schema.`);
+    if (definition.nodes[spec.node]?.fanOut !== spec.field) {
+      throw new GraphDefinitionError(`Fanout node "${spec.node}" must declare fanOut field "${spec.field}".`);
+    }
+  }
+
+  for (const spec of definition.joins ?? []) {
+    if (spec.nodes.length === 0) throw new GraphDefinitionError("Join requires at least one upstream node.");
+    for (const source of spec.nodes) {
+      if (!nodeNames.has(source)) throw new GraphDefinitionError(`Join source "${source}" is not defined.`);
+    }
+    if (!nodeNames.has(spec.target)) throw new GraphDefinitionError(`Join target "${spec.target}" is not defined.`);
+  }
+
+  for (const spec of definition.reductions ?? []) {
+    if (!stateKeys.has(spec.field)) throw new GraphDefinitionError(`Reduction field "${spec.field}" is not in the state schema.`);
+  }
+
+  for (const spec of definition.loops ?? []) {
+    validateBoundedRoute(spec.node, spec.targets, spec.maxRounds, nodeNames, `loop on "${spec.node}"`);
+  }
+
+  for (const spec of definition.errorRoutes ?? []) {
+    validateBoundedRoute(spec.node, spec.targets, 1, nodeNames, `error route on "${spec.node}"`);
+  }
+}
+
+function validateBoundedRoute(
+  node: string,
+  targets: readonly string[],
+  maxRounds: number,
+  nodeNames: ReadonlySet<string>,
+  label: string,
+): void {
+  if (!nodeNames.has(node)) throw new GraphDefinitionError(`Route source "${node}" is not defined for ${label}.`);
+  if (targets.length === 0) throw new GraphDefinitionError(`${label} requires at least one target.`);
+  if (maxRounds <= 0) throw new CompileRuleViolationError(`${label} requires a positive maxRounds.`, "L1");
+  for (const target of targets) {
+    if (target !== "END" && !nodeNames.has(target)) throw new GraphDefinitionError(`Route target "${target}" is not defined for ${label}.`);
+  }
 }
 
 function validate<
