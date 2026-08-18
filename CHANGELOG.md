@@ -1,5 +1,49 @@
 # Changelog
 
+## Unreleased
+
+### Fluent `GraphBuilder` — silent stubs now fail fast
+
+The fluent builder previously accepted several controls (`.rag()`, `.supervisor()`,
+`.reflect()`, `.replan()`, `.evaluate()`, `.remember()`, `.transaction()`, plus the
+`map()`/`reduce()` object forms and a bare `.subgraph(name)`) that wrote to a dead
+`controls` map and did nothing. They now throw a `GraphDefinitionError` naming the
+supported alternative, so a broken topology is caught at build time instead of being
+silently dropped.
+
+### New real controls
+
+- `.route(routes, { field })` — lowers to a bounded `conditional()` edge keyed on a
+  declared state field. The selector field is required (no silent default).
+- `.parallel(participants, { into })` — registers each branch as a real node, emits
+  fan-out + convergence edges, and adds a `JoinSpec` barrier at the join target.
+  Barrier-correct with sequential interleaving; true concurrency is tracked separately.
+- `.plan(options)` — writes a declarative `PlanSpec` (`{ tier?, produce, into }`) onto
+  the `GraphDefinition`. The executor resolves the tier through the run's
+  `ModelRegistry`, calls `model.chat()` with a JSON-array-of-strings contract, and
+  merges the result into `state[plan.into]`. Throws `GraphDefinitionError` if no tier
+  is bound; skipped on resumed threads. Compile-time validation ensures `plan.into` is
+  a declared state key.
+
+### Type and contract alignment
+
+- `PlanSpec` added to `GraphDefinition`; `LLMSession` now `extends Pick<LLMProvider, "chat">`.
+- `Model` documented as the `LLMProvider` superset (`.generate()` wraps `.chat()`,
+  `.structured()` adds schema-constrained output).
+
+### Checkpointer
+
+- `createMemoryCheckpointer` exported from the core barrel as the canonical in-process
+  implementation. Downstream packages re-export it instead of carrying their own copy
+  (removes a `createdAt` sort-tie bug that could re-trigger approval on resume for
+  same-millisecond checkpoints).
+
+### Tests & docs
+
+- `fluent-contract.test.ts` split into real-behavior, fail-fast, and preserved-passing
+  groups; adds same-millisecond checkpoint-tie and approval-resume regressions.
+- README rewritten with a Live / Planned support matrix.
+
 ## 0.1.0
 
 Initial release of the framework-agnostic @langgraph-toolkit/core monorepo.

@@ -114,18 +114,39 @@ Node labels and edge labels become stream metadata. Use `workflow.stream(input, 
 
 ## Scale from a linear workflow to explicit topology
 
-The fluent surface is additive. Start with nodes and a linear path, then add the controls that express a real requirement.
+The fluent surface is additive. Start with nodes and a linear path, then add the controls that express a real
+requirement. Controls fall into two classes: **live** controls lower into real topology or runtime behavior, and *
+*planned** controls fail fast with a `GraphDefinitionError` that names the supported alternative.
 
-| Need | Canonical control |
-| --- | --- |
-| Named transition with UI-visible progress | `.edge(from, to, label?)` |
-| Bounded conditional branch | `.conditional()` or `.route()` |
-| Independent work and a convergence barrier | `.parallel()`, `.join()` |
-| Collection work | `.map()`, `.reduce()` |
-| Review, policy, or human pause | `.guard()`, `.approval()`, `.interrupt()` |
-| Recovery and resilience | `.retry()`, `.fallback()`, `.transaction()` |
-| Reusable capabilities | `.subgraph()`, `.rag()`, `.supervisor()`, `.remember()`, `.evaluate()` |
-| Durable continuation | `.checkpoint()` |
+**Live controls — lower to topology or runtime:**
+
+| Control                                                                  | What it does                                                                                                                             |
+|--------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
+| `.node()`, `.edge()`, `.start()`                                         | Register named nodes, labeled transitions, and the entry point                                                                           |
+| `.conditional()`, `.router()`, `.route()`                                | Bounded branching; `.route()` picks a target from a declared state field                                                                 |
+| `.fanout()`, `.converge()`, `.dynamicFanout()`                           | Collection fan-out, declared convergence cycles, and data-driven fan-out                                                                 |
+| `.parallel()`, `.join()`                                                 | Independent named branches and a convergence barrier (barrier-correct, sequentially interleaved; true concurrency is tracked separately) |
+| `.loop()`, `.onError()`                                                  | Bounded repeat routes and error routing                                                                                                  |
+| `.interrupt()`, `.interruptBefore()`, `.interruptAfter()`, `.approval()` | Human-in-the-loop pauses and approval gates                                                                                              |
+| `.retry()`, `.fallback()`, `.guard()`                                    | Resilience, recovery, and pre-node policy checks                                                                                         |
+| `.map()`, `.reduce()` (string form)                                      | Collection work over a state field                                                                                                       |
+| `.subgraph()`, `.nestedGraph()`, `.dynamicGraph()`                       | Reusable and composed graphs                                                                                                             |
+| `.checkpoint()`                                                          | Durable continuation backed by an injected checkpointer                                                                                  |
+| `.plan()`                                                                | Declarative `PlanSpec` (model tier + target field) consumed by the executor                                                              |
+
+**Planned controls — throw `GraphDefinitionError` with the supported alternative:**
+
+| Control                            | Suggested alternative                               |
+|------------------------------------|-----------------------------------------------------|
+| `.rag()`                           | `.subgraph()` to compose a retrieval pipeline       |
+| `.supervisor()`                    | `.conditional()` + `.join()` to orchestrate agents  |
+| `.reflect()`                       | A critique node with `.guard()` or `.loop()`        |
+| `.replan()`                        | `.plan()` with `.loop()`                            |
+| `.evaluate()`                      | A scoring node directly                             |
+| `.remember()`                      | `.checkpoint()` for state persistence               |
+| `.transaction()`                   | `.checkpoint()` for rollback support                |
+| `.subgraph()` without a graph      | `.subgraph(name, graph)` with a compiled graph      |
+| `.map()` / `.reduce()` object form | `.map(field, nodeName)` / `.reduce(field, reducer)` |
 
 `createGraph(options)` exposes the same builder contract for advanced workflow topology. It is the right choice when named entry points, routes, joins, fan-out, loops, or graph composition are central to the resource design.
 
