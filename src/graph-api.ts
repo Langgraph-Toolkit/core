@@ -8,6 +8,7 @@
 import { compile } from "./compile.js";
 import { buildGraph } from "./executor.js";
 import { conditional, defineGraph, defineState, edge, node, tool } from "./defineGraph.js";
+import { GraphDefinitionError } from "./types.js";
 import type {
   CompiledGraph,
   Checkpoint,
@@ -33,12 +34,14 @@ import type {
   InferState,
   IntentSpec,
   InterruptRequest,
+  JoinSpec,
   NodeFunction,
   NodeRiskClass,
   StateSchema,
   StateOptions,
   RetrySpec,
   FallbackSpec,
+  PlanSpec,
   FrameworkState,
 } from "./types.js";
 
@@ -129,6 +132,16 @@ export interface ReduceOptions<TState extends object> {
 
 /** Static route map used by the high-level facade. */
 export type RouteMap = Readonly<Record<string, string>>;
+
+/** Options for the declarative model-backed `.plan()` control. */
+export interface PlanOptions {
+  /** Tier alias resolved through the run's ModelRegistry when the plan executes. */
+  readonly tier?: string;
+  /** Which pipeline construct the plan feeds: a subtask list or a route decision. */
+  readonly produce?: "subtasks" | "route";
+  /** State field the produced plan is written into. Defaults to "subtasks". */
+  readonly into?: string;
+}
 
 /** Interrupt shorthand for approval and human-in-the-loop flows. */
 export interface InterruptOptions {
@@ -265,13 +278,13 @@ export interface GraphBuilder<
   /** Reflect over the current workflow result. */
   reflect(options?: { readonly threshold?: number }): GraphBuilder<TState, TInput, TOutput, C, TVariables, TGlobal>;
   /** Add a model-backed planning capability. */
-  plan(options?: object): GraphBuilder<TState, TInput, TOutput, C, TVariables, TGlobal>;
+  plan(options?: PlanOptions): GraphBuilder<TState, TInput, TOutput, C, TVariables, TGlobal>;
   /** Add a model-backed replanning capability. */
   replan(options?: object): GraphBuilder<TState, TInput, TOutput, C, TVariables, TGlobal>;
-  /** Register a static or classifier-backed route map. */
-  route(routes: RouteMap): GraphBuilder<TState, TInput, TOutput, C, TVariables, TGlobal>;
-  /** Register parallel named capabilities. */
-  parallel(options?: ParallelOptions<TState>): GraphBuilder<TState, TInput, TOutput, C, TVariables, TGlobal>;
+  /** Register a static route map branching on a declared state field. */
+  route(routes: RouteMap, opts: { readonly field: keyof TState & string }): GraphBuilder<TState, TInput, TOutput, C, TVariables, TGlobal>;
+  /** Register parallel named capabilities with a convergence barrier. */
+  parallel(options?: ParallelOptions<TState>, opts?: { readonly into?: string }): GraphBuilder<TState, TInput, TOutput, C, TVariables, TGlobal>;
   /** Register a retry policy. */
   retry(options?: RetryOptions | number): GraphBuilder<TState, TInput, TOutput, C, TVariables, TGlobal>;
   /** Register a fallback policy. */
@@ -301,7 +314,6 @@ export type GraphFactory<TState extends object> = (state: TState) => GraphBuilde
 
 interface BuilderOptions<TState extends object, TInput extends object, TOutput extends object, C extends GraphContracts, TVariables extends JsonObject, TGlobal extends JsonObject> {
   readonly definition: GraphDefinition<TState, TInput, TOutput, C, TVariables, TGlobal>;
-  readonly controls: Map<string, ReadonlyArray<string>>;
 }
 
 /** Create a typed state descriptor with runtime fields and optional state behavior. */
@@ -388,7 +400,6 @@ export function composeWorkflows<
       edges,
       entry: first.entry,
     },
-    controls: new Map(),
   });
 }
 
@@ -435,8 +446,7 @@ export function createGraph<
         global: options.global,
         runtime: options.runtime,
       };
-  const controls = new Map<string, ReadonlyArray<string>>();
-  return createBuilder({ definition, controls });
+  return createBuilder({ definition });
 }
 
 /**
@@ -484,15 +494,11 @@ function createBuilder<
   C extends GraphContracts,
   TVariables extends JsonObject,
   TGlobal extends JsonObject,
->({ definition, controls }: BuilderOptions<TState, TInput, TOutput, C, TVariables, TGlobal>): GraphBuilder<TState, TInput, TOutput, C, TVariables, TGlobal> {
-  const clone = (next: GraphDefinition<TState, TInput, TOutput, C, TVariables, TGlobal>): GraphBuilder<TState, TInput, TOutput, C, TVariables, TGlobal> => createBuilder({ definition: next, controls });
+>({ definition }: BuilderOptions<TState, TInput, TOutput, C, TVariables, TGlobal>): GraphBuilder<TState, TInput, TOutput, C, TVariables, TGlobal> {
+  const clone = (next: GraphDefinition<TState, TInput, TOutput, C, TVariables, TGlobal>): GraphBuilder<TState, TInput, TOutput, C, TVariables, TGlobal> => createBuilder({ definition: next });
   const withNodes = (nodes: Record<string, NodeSpec<TState, C, TVariables, TGlobal>>): GraphDefinition<TState, TInput, TOutput, C, TVariables, TGlobal> => ({ ...definition, nodes });
   const nodes = (): Record<string, NodeSpec<TState, C, TVariables, TGlobal>> => ({ ...definition.nodes });
   const withEdges = (edges: GraphDefinition<TState, TInput, TOutput, C, TVariables, TGlobal>["edges"]): GraphDefinition<TState, TInput, TOutput, C, TVariables, TGlobal> => ({ ...definition, edges });
-  const capability = (name: string, values: readonly string[] = []): GraphBuilder<TState, TInput, TOutput, C, TVariables, TGlobal> => {
-    controls.set(name, values);
-    return clone(definition);
-  };
   const resolveCheckpointer = (source: CheckpointSource | undefined): Checkpointer => {
     if (source === undefined) return createMemoryCheckpointer();
     return "checkpointer" in source ? source.checkpointer : source;
@@ -572,7 +578,6 @@ function createBuilder<
             ? definition.fanouts
             : [...(definition.fanouts ?? []).filter((spec) => spec.node !== nodeName), { node: nodeName, field: route.field }],
         },
-        controls,
       });
     },
     join(upstreamOrTarget: readonly string[] | string | { readonly from: readonly string[]; readonly into: string }, target?: string) {
@@ -590,8 +595,7 @@ function createBuilder<
     },
     map(fieldOrOptions: (keyof TState & string) | MapOptions<TState>, nodeName?: string) {
       if (typeof fieldOrOptions !== "string") {
-        controls.set("map", [fieldOrOptions.into ?? "inferred"]);
-        return clone(definition);
+        throw notImplemented("map() object form", "map(field, nodeName)");
       }
       const field = fieldOrOptions;
       if (!nodeName) return clone(definition);
@@ -611,12 +615,10 @@ function createBuilder<
     },
     reduce(fieldOrOptions: (keyof TState & string) | ReduceOptions<TState>, reducer?: StateReducer<TState>) {
       if (typeof fieldOrOptions !== "string") {
-        controls.set(`reduce:${fieldOrOptions.from}`, [fieldOrOptions.into ?? fieldOrOptions.from]);
-        return clone(definition);
+        throw notImplemented("reduce() object form", "reduce(field, reducer)");
       }
       const field = fieldOrOptions;
       if (!reducer) return clone(definition);
-      controls.set(`reduce:${field}`, [reducer.name || field]);
       return clone({
         ...definition,
         reductions: [...(definition.reductions ?? []).filter((spec) => spec.field !== field), { field, reducer }],
@@ -630,7 +632,7 @@ function createBuilder<
       });
     },
     subgraph(name: string, graph?: CompiledGraph<object>) {
-      if (!graph) return capability("subgraph", [name]);
+      if (!graph) throw notImplemented("subgraph() without a compiled graph", "subgraph(name, graph)");
       return clone(withNodes({ ...nodes(), [name]: { fn: async () => Object.assign({} as Partial<TState>, (await graph.run({})).state) } }));
     },
     nestedGraph(name, graph) {
@@ -661,38 +663,96 @@ function createBuilder<
     build() {
       return buildGraph(definition);
     },
-    reflect(options) {
-      return capability("reflect", options?.threshold === undefined ? [] : [String(options.threshold)]);
+    reflect() {
+      throw notImplemented("reflect()", "add a critique node with guard() or loop()");
     },
-    plan() {
-      return capability("plan");
+    plan(options: PlanOptions = {}) {
+      const tier = options.tier;
+      const produce = options.produce ?? "subtasks";
+      const into = options.into ?? "subtasks";
+      if (!(into in definition.state)) {
+        throw new GraphDefinitionError(
+          `plan() target field "${into}" is not declared in the graph state.`,
+        );
+      }
+      return clone({ ...definition, plan: { tier, produce, into } });
     },
     replan() {
-      return capability("replan");
+      throw notImplemented("replan()", "use plan() with a loop()");
     },
-    route(routes) {
-      return capability("route", Object.entries(routes).map(([label, target]) => `${label}:${target}`));
+    route(routes, opts) {
+      const field = opts.field as keyof TState & string;
+      if (!(field in definition.state)) {
+        throw new GraphDefinitionError(
+          `route() selector field "${String(field)}" is not declared in the graph state.`,
+        );
+      }
+      const targets = [...new Set(Object.values(routes))];
+      const previous = definition.edges.length > 0
+        ? definition.edges[definition.edges.length - 1]
+        : undefined;
+      const current = previous && "to" in previous ? previous.to : definition.entry;
+      const routeFn = (state: TState): string => {
+        const key = String((state as unknown as Record<string, unknown>)[field as string]);
+        const target = routes[key as keyof typeof routes];
+        if (typeof target !== "string") {
+          throw new GraphDefinitionError(
+            `route() map has no entry for ${String(field)}="${key}".`,
+          );
+        }
+        return target;
+      };
+      return clone(withEdges([
+        ...definition.edges,
+        conditional(current, routeFn, targets, `route:${String(field)}`),
+      ]));
     },
-    parallel(options = {}) {
-      return capability("parallel", Object.keys(options));
+    parallel(options: ParallelOptions<TState> = {}, opts?: { readonly into?: string }) {
+      const entries = Object.entries(options);
+      if (entries.length === 0) return clone(definition);
+      let next = definition;
+      const names: string[] = [];
+      const previous = definition.edges.length > 0
+        ? definition.edges[definition.edges.length - 1]
+        : undefined;
+      const current = previous && "to" in previous ? previous.to : definition.entry;
+      for (const [name, participant] of entries) {
+        const spec: NodeSpec<TState, C, TVariables, TGlobal> = typeof participant === "function"
+          ? { fn: async (state, _ctx) => participant(state) as Promise<Partial<TState>> }
+          : { fn: async (state, _ctx) => (await participant.run(state)).output as Partial<TState> };
+        next = { ...next, nodes: { ...next.nodes, [name]: spec } };
+        names.push(name);
+      }
+      const fanoutEdges = names.map((name) => edge(current, name));
+      const into = opts?.into;
+      if (into) {
+        const convergeEdges = names.map((name) => edge(name, into));
+        const joinSpec: JoinSpec = { nodes: names, target: into };
+        next = {
+          ...next,
+          edges: [...next.edges, ...fanoutEdges, ...convergeEdges],
+          joins: [...(next.joins ?? []).filter((spec) => spec.target !== into), joinSpec],
+        };
+      } else {
+        next = { ...next, edges: [...next.edges, ...fanoutEdges] };
+      }
+      return clone(next);
     },
     retry(options = {}) {
       const normalized: RetrySpec = {
         attempts: Math.max(1, typeof options === "number" ? options : options.attempts ?? 1),
         backoff: typeof options === "number" ? "fixed" : options.backoff ?? "fixed",
       };
-      controls.set("retry", [String(normalized.attempts)]);
       return clone({ ...definition, retries: [...(definition.retries ?? []), normalized] });
     },
     fallback(options = {}) {
       const policy = options.policy ?? "recover";
-      if (policy === "rethrow") return capability("fallback", ["rethrow"]);
+      if (policy === "rethrow") throw notImplemented("fallback() with policy 'rethrow'", null);
       if (options.node) {
         const fallback: FallbackSpec = { target: options.node, policy };
-        controls.set("fallback", [options.node]);
         return clone({ ...definition, fallbacks: [...(definition.fallbacks ?? []), fallback] });
       }
-      if (!options.run) return capability("fallback", []);
+      if (!options.run) throw notImplemented("fallback() without node or run", null);
       const target = `__fallback_${definition.fallbacks?.length ?? 0}`;
       const fallback: FallbackSpec = { target, policy };
       const fallbackNode: NodeSpec<TState, C, TVariables, TGlobal> = {
@@ -700,7 +760,6 @@ function createBuilder<
         label: "Fallback recovery",
         stepLabel: "Fallback recovery",
       };
-      controls.set("fallback", [target]);
       return clone({
         ...withNodes({ ...nodes(), [target]: fallbackNode }),
         fallbacks: [...(definition.fallbacks ?? []), fallback],
@@ -712,11 +771,9 @@ function createBuilder<
         check: options.check ?? options.when ?? (() => true),
         message: options.message ?? options.policy,
       };
-      controls.set("guard", guard.nodes.length === 0 ? ["all"] : guard.nodes);
       return clone({ ...definition, guards: [...(definition.guards ?? []), guard] });
     },
     approval(options = {}) {
-      controls.set("approval", nodeNames(options.before));
       const targets = nodeNames(options.before);
       if (targets.length === 0) return clone(definition);
       const request = interruptRequest({ ...options, type: "approval" });
@@ -742,27 +799,25 @@ function createBuilder<
     },
     interrupt(options) {
       const normalized = options ?? {};
-      controls.set("interrupt", normalized.type ? [normalized.type] : []);
       const before = appendInterrupt(definition, normalized.before, "before", normalized);
       return clone(appendInterrupt(before, normalized.after, "after", normalized));
     },
-    transaction(options) {
-      return capability("transaction", [options?.state ? "state" : "none", options?.sideEffects ? "side-effects" : "no-side-effects", options?.checkpoint ? "checkpoint" : "no-checkpoint"]);
+    transaction() {
+      throw notImplemented("transaction()", "checkpoint() for rollback support");
     },
     rag() {
-      return capability("rag");
+      throw notImplemented("rag()", "subgraph() to compose a retrieval pipeline");
     },
     supervisor() {
-      return capability("supervisor");
+      throw notImplemented("supervisor()", "conditional() + join() to orchestrate agents");
     },
     evaluate() {
-      return capability("evaluate");
+      throw notImplemented("evaluate()", "a scoring node directly");
     },
     remember() {
-      return capability("remember");
+      throw notImplemented("remember()", "checkpoint() for state persistence");
     },
     checkpoint(source) {
-      controls.set("checkpoint", [source === undefined ? "memory" : "configured"]);
       return clone({
         ...definition,
         runtime: {
@@ -774,8 +829,14 @@ function createBuilder<
   };
 }
 
+/** Error for fluent controls that have no real lowering yet. */
+function notImplemented(feature: string, alternative: string | null): GraphDefinitionError {
+  const suffix = alternative ? ` Use ${alternative}.` : "";
+  return new GraphDefinitionError(`${feature} is not yet implemented.${suffix}`);
+}
+
 /** Process-local checkpoint store used by `.checkpoint()` when no adapter is supplied. */
-function createMemoryCheckpointer(): Checkpointer {
+export function createMemoryCheckpointer(): Checkpointer {
   const checkpoints = new Map<string, Checkpoint>();
   return {
     async get(threadId) {

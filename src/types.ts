@@ -311,6 +311,16 @@ export interface FallbackSpec {
   readonly policy: "recover" | "return" | "rethrow";
 }
 
+/** Declarative model-backed planning lowered from fluent `.plan()`. */
+export interface PlanSpec {
+  /** Tier alias resolved through the run's ModelRegistry when the plan executes. */
+  readonly tier?: string;
+  /** Which pipeline construct the plan feeds: a subtask list or a route decision. */
+  readonly produce: "subtasks" | "route";
+  /** State field the produced plan is written into. Defaults to "subtasks". */
+  readonly into: string;
+}
+
 /** A workflow-level predicate evaluated before selected nodes execute. */
 export interface GuardSpec<TState extends object> {
   readonly nodes: readonly string[];
@@ -369,6 +379,8 @@ export interface GraphDefinition<TState extends object, TInput extends object = 
   readonly global?: Partial<TGlobal>;
   /** Runtime resources inherited by `run()` and `stream()`. */
   readonly runtime?: GraphRuntimeOptions<TVariables, TGlobal>;
+  /** Declarative model-backed plan lowered from fluent `.plan()`. */
+  readonly plan?: PlanSpec;
 }
 export interface CompiledGraph<TState extends object, TInput extends object = Partial<TState>, TOutput extends object = TState, C extends GraphContracts = DefaultGraphContracts, TVariables extends JsonObject = JsonObject, TGlobal extends JsonObject = JsonObject> {
   readonly definition: GraphDefinition<TState, TInput, TOutput, C, TVariables, TGlobal>;
