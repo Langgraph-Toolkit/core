@@ -32,6 +32,7 @@ import type {
 } from "./types.js";
 import {
   CancelledError,
+  GraphDefinitionError,
   GraphRuntimeError,
   InterruptSignal,
   PermissionDeniedError,
@@ -489,6 +490,41 @@ function tierAliasInRegistry(registry: ModelRegistry, alias: string): boolean {
   }
 }
 
+/**
+ * Prompt contract for declarative `.plan()` consumption (PlanSpec). The model
+ * must reply with ONLY a JSON array of short strings; parsePlanResult()
+ * enforces that shape defensively.
+ */
+function planPrompt(state: object, produce: "subtasks" | "route"): string {
+  const mode = produce === "route"
+    ? "the ordered execution steps to follow"
+    : "concrete subtasks to execute";
+  return [
+    `Decide ${mode} for the task below.`,
+    'Reply with ONLY a JSON array of short strings, e.g. ["fetch data", "summarize"]. No prose.',
+    `Task context: ${JSON.stringify(state)}`,
+  ].join("\n");
+}
+
+/** Parse the plan model reply. Expects a JSON array of strings; throws on drift. */
+function parsePlanResult(content: string): readonly string[] {
+  const trimmed = content.trim();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    throw new GraphRuntimeError(
+      `plan() model reply is not valid JSON: ${trimmed.slice(0, 200)}`,
+    );
+  }
+  if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== "string")) {
+    throw new GraphRuntimeError(
+      `plan() model reply must be a JSON array of strings, got: ${trimmed.slice(0, 200)}`,
+    );
+  }
+  return parsed as string[];
+}
+
 export async function execute<TState extends object, TInput extends object = Partial<TState>, TOutput extends object = TState, C extends GraphContracts = DefaultGraphContracts, TVariables extends JsonObject = JsonObject, TGlobal extends JsonObject = JsonObject>(
   graph: CompiledGraph<TState, TInput, TOutput, C, TVariables, TGlobal>,
   input: TInput,
@@ -598,6 +634,29 @@ export async function* streamEvents<TState extends object, TInput extends object
     if (lastCheckpoint) {
       node = lastCheckpoint.node === "END" ? graph.entry : lastCheckpoint.node;
       round = lastCheckpoint.round;
+    }
+
+    // Declarative PlanSpec (fluent `.plan()`): resolve the bound tier through
+    // the run's ModelRegistry and produce the plan before the first node runs.
+    // Skipped on a resumed thread -- the first run's plan is persisted in state.
+    const plan = graph.definition.plan;
+    if (plan && !lastCheckpoint && !opts.resumeFrom) {
+      const registry = opts.modelRegistry;
+      const tierAlias = plan.tier ?? "__default__";
+      const model = registry && tierAliasInRegistry(registry, tierAlias)
+        ? registry.tier(tierAlias)
+        : undefined;
+      if (!model) {
+        throw new GraphDefinitionError(
+          `plan() requires a bound model tier "${tierAlias}". Supply a modelRegistry with this tier configured.`,
+        );
+      }
+      const result = await model.chat([
+        { role: "user", content: planPrompt(state, plan.produce) },
+      ]);
+      state = mergeState(graph, state, {
+        [plan.into]: parsePlanResult(result.content),
+      } as Partial<TState>);
     }
 
     const seen = new Set<string>(); // Rule L1: dry-loop dedupe on ALL visited

@@ -152,6 +152,10 @@ function validateControls<
     validateBoundedRoute(spec.node, spec.targets, spec.maxRounds, nodeNames, `loop on "${spec.node}"`);
   }
 
+  if (definition.plan && !stateKeys.has(definition.plan.into)) {
+    throw new GraphDefinitionError(`Plan target field "${definition.plan.into}" is not in the state schema.`);
+  }
+
   for (const spec of definition.errorRoutes ?? []) {
     validateBoundedRoute(spec.node, spec.targets, 1, nodeNames, `error route on "${spec.node}"`);
   }
