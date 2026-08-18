@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createGraph,
+  createMemoryCheckpointer,
   createNode,
   createState,
   createWorkflow,
@@ -52,48 +53,100 @@ describe("0.2.0 fluent workflow contract", () => {
     });
   });
 
-  it("supports canonical config objects and shorthand overloads", () => {
-    const state = createState({
-      query: "",
-      documents: [] as string[],
-      answer: "",
-      summary: "",
-    });
-    const documentAgent = async (document: string): Promise<{ answer: string }> => ({ answer: document });
+  it("lowers route() into a bounded conditional edge keyed on the selector field", () => {
+    const state = createState({ intent: "", answer: "" });
+    const workflow = createWorkflow("route-contract", { state })
+      .node("branch-a", createNode(async () => ({ answer: "a" })))
+      .node("branch-b", createNode(async () => ({ answer: "b" })))
+      .start("branch-a")
+      .edge("branch-a", "branch-b", "step")
+      .route({ quick: "branch-b", deep: "branch-a" }, { field: "intent" });
 
-    const workflow = createWorkflow("contract-config", { state })
-      .parallel({ sql: documentAgent, rag: documentAgent })
-      .map({
-        from: (value: { documents: string[] }) => value.documents,
-        run: documentAgent,
-        into: "answer",
-      })
-      .join({ from: ["sql", "rag"], into: "answer" })
-      .reduce({
-        from: "answer",
-        into: "summary",
-        reducer: (previous: string, next: string) => `${previous}${next}`,
-      })
-      .join("answer")
-      .retry({ attempts: 3, backoff: "exponential" })
-      .retry(2)
-      .fallback({ node: "answer", run: documentAgent, policy: "recover" })
-      .route({ quick_chat: "answer", complex: "answer" })
-      .interrupt({ type: "approval", text: "Continue?" })
-      .transaction({ state: true, sideEffects: true, checkpoint: true })
-      .plan()
-      .reflect({ threshold: 0.8 })
-      .replan()
-      .guard()
-      .approval()
-      .subgraph("answer")
-      .rag()
-      .supervisor()
-      .evaluate()
-      .remember()
-      .checkpoint();
+    const definition = workflow.definition();
+    const conditional = definition.edges.find((edge) => "fn" in edge);
 
-    expect(workflow).toBeDefined();
+    expect(conditional).toBeDefined();
+    if (!conditional || !("fn" in conditional)) throw new Error("Expected a conditional edge.");
+    expect(conditional.from).toBe("branch-b");
+    expect(conditional.label).toBe("route:intent");
+    expect(conditional.targets).toEqual(expect.arrayContaining(["branch-a", "branch-b"]));
+    expect(conditional.fn({ intent: "quick" })).toBe("branch-b");
+    expect(conditional.fn({ intent: "deep" })).toBe("branch-a");
+    expect(() => conditional.fn({ intent: "unknown" })).toThrow(/route\(\) map has no entry for intent="unknown"/);
+  });
+
+  it("rejects route() selector fields that are not declared in the state schema", () => {
+    const state = createState({ answer: "" });
+    const builder = createWorkflow("route-field-contract", { state })
+      .node("answer", createNode(async () => ({ answer: "ok" })))
+      .start("answer");
+
+    expect(() => builder.route({ quick: "answer" }, { field: "intent" })).toThrow(/not declared in the graph state/);
+  });
+
+  it("lowers parallel() into branch nodes, fan-out and convergence edges, and a join barrier", () => {
+    const state = createState({ query: "", documents: [] as string[], answer: "" });
+    const branch = async (): Promise<{ answer: string }> => ({ answer: "done" });
+
+    const workflow = createWorkflow("parallel-contract", { state })
+      .node("seed", createNode(async () => ({})))
+      .start("seed")
+      .parallel({ sql: branch, rag: branch }, { into: "answer" });
+
+    const definition = workflow.definition();
+    expect(Object.keys(definition.nodes)).toEqual(expect.arrayContaining(["seed", "sql", "rag"]));
+    const fixed = definition.edges.filter((edge) => "to" in edge);
+    expect(fixed).toEqual(expect.arrayContaining([
+      expect.objectContaining({ from: "seed", to: "sql" }),
+      expect.objectContaining({ from: "seed", to: "rag" }),
+      expect.objectContaining({ from: "sql", to: "answer" }),
+      expect.objectContaining({ from: "rag", to: "answer" }),
+    ]));
+    expect(definition.joins).toEqual([
+      { nodes: ["sql", "rag"], target: "answer" },
+    ]);
+  });
+
+  it("records plan() as a declarative PlanSpec and fails at runtime without a bound model tier", async () => {
+    const state = createState({ query: "", subtasks: [] as string[], answer: "" });
+    const workflow = createWorkflow("plan-contract", { state })
+      .node("seed", createNode(async () => ({})))
+      .start("seed")
+      .plan();
+
+    expect(workflow.definition().plan).toEqual({ tier: undefined, produce: "subtasks", into: "subtasks" });
+
+    const result = await workflow.compile().invoke({});
+    expect(result.stoppedReason).toBe("error");
+    expect(result.error?.message).toMatch(/plan\(\) requires a bound model tier/);
+  });
+
+  it("fails fast on fluent controls that are not yet implemented", () => {
+    const state = createState({ query: "", answer: "", summary: "" });
+    const builder = createWorkflow("fail-fast-contract", { state })
+      .node("answer", createNode(async () => ({ answer: "ok" })))
+      .start("answer");
+
+    expect(() => builder.rag()).toThrow(/not yet implemented/);
+    expect(() => builder.supervisor()).toThrow(/not yet implemented/);
+    expect(() => builder.replan()).toThrow(/not yet implemented/);
+    expect(() => builder.reflect()).toThrow(/not yet implemented/);
+    expect(() => builder.evaluate()).toThrow(/not yet implemented/);
+    expect(() => builder.remember()).toThrow(/not yet implemented/);
+    expect(() => builder.transaction()).toThrow(/not yet implemented/);
+    expect(() => builder.subgraph("answer")).toThrow(/not yet implemented/);
+    expect(() => builder.map({
+      from: (value: { query: string }) => [value.query],
+      run: async (item: string) => ({ answer: item }),
+      into: "answer",
+    })).toThrow(/not yet implemented/);
+    expect(() => builder.reduce({
+      from: "answer",
+      into: "summary",
+      reducer: (previous, next) => `${previous}${next}`,
+    })).toThrow(/not yet implemented/);
+    expect(() => builder.fallback({})).toThrow(/not yet implemented/);
+    expect(() => builder.fallback({ policy: "rethrow" })).toThrow(/not yet implemented/);
   });
 
   it("lowers fluent interrupt and approval policies into executable human-in-the-loop pauses", async () => {
@@ -161,6 +214,60 @@ describe("0.2.0 fluent workflow contract", () => {
 
     expect(checkpointer).toBeDefined();
     await expect(checkpointer?.list("checkpoint-contract-thread")).resolves.toHaveLength(1);
+  });
+
+  it("returns the newest checkpoint on a same-millisecond tie instead of re-triggering approval", async () => {
+    // Regression for the adapter-checkpointers sort-tie bug: when several nodes
+    // checkpoint within the same millisecond, sorting by createdAt can return
+    // the OLDEST record and re-pause a node that already resumed. The canonical
+    // memory checkpointer therefore orders by insertion, not timestamp.
+    const checkpointer = createMemoryCheckpointer();
+    const sameMillisecond = Date.now();
+    await checkpointer.put({
+      threadId: "tie-thread",
+      checkpointId: "cp-old",
+      state: { node: "paused", approved: false },
+      node: "paused",
+      round: 1,
+      createdAt: sameMillisecond,
+      pendingInterrupt: { node: "paused", mode: "before" },
+    });
+    await checkpointer.put({
+      threadId: "tie-thread",
+      checkpointId: "cp-new",
+      state: { node: "resumed", approved: true },
+      node: "resumed",
+      round: 2,
+      createdAt: sameMillisecond,
+    });
+
+    const latest = await checkpointer.get("tie-thread");
+    expect(latest?.checkpointId).toBe("cp-new");
+    expect(latest?.node).toBe("resumed");
+    expect(latest?.pendingInterrupt).toBeUndefined();
+  });
+
+  it("does not re-trigger an approval gate when resuming a paused thread", async () => {
+    const state = createState({ approved: false, result: "" });
+    let executions = 0;
+    const compiled = createWorkflow("approval-resume-contract", { state })
+      .node("act", createNode(async () => {
+        executions += 1;
+        return { result: "executed" };
+      }))
+      .start("act")
+      .approval({ before: "act", when: (value) => !value.approved, text: "Approve the act?" })
+      .checkpoint()
+      .compile();
+
+    const paused = await compiled.invoke({}, { threadId: "approval-resume-thread" });
+    expect(paused.stoppedReason).toBe("interrupt");
+    expect(executions).toBe(0);
+
+    const resumed = await compiled.resume("approval-resume-thread", true);
+    expect(resumed.stoppedReason).toBe("done");
+    expect(resumed.state.result).toBe("executed");
+    expect(executions).toBe(1);
   });
 
   it("executes fluent retry, fallback and guard policies at runtime", async () => {
