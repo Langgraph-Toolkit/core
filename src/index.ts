@@ -30,6 +30,7 @@ export {
   createStepLabel,
   createRisk,
   createTier,
+  createMemoryCheckpointer,
 } from "./graph-api.js";
 
 /** Schema builder for typed state, tool inputs and structured model outputs. */
