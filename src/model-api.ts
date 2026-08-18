@@ -46,7 +46,16 @@ export interface StructuredModel<TValue extends object> {
   generate(request: Omit<ModelRequest, "responseFormat">): Promise<TValue>;
 }
 
-/** Model facade used by Core graph and agent orchestration. */
+/**
+ * Model facade used by Core graph and agent orchestration.
+ *
+ * A superset of the canonical `LLMProvider` contract (types.ts): `.generate()`
+ * wraps `LLMProvider.chat()` with a richer request/response shape, `.stream()`
+ * mirrors `LLMProvider.stream()`, and `.structured()` adds schema-constrained
+ * output that `LLMProvider` does not provide. Anything that consumes an
+ * `LLMProvider` (e.g. `ModelRegistry.tier()`) stays framework-neutral; use
+ * `Model` only where structured output or the Core request shape is needed.
+ */
 export interface Model {
   readonly name: string;
   generate(request: ModelRequest): Promise<ModelResponse>;

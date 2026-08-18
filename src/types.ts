@@ -500,8 +500,8 @@ export interface LLMProvider {
   stream(messages: readonly ChatMessage[], opts?: ChatStreamOptions): AsyncIterable<string>;
   streamDetailed?(messages: readonly ChatMessage[], opts?: ChatStreamOptions): AsyncIterable<ChatStreamChunk>;
 }
-export interface LLMSession {
-  chat(messages: readonly ChatMessage[], opts?: ChatStreamOptions): Promise<ChatResult>;
+/** Minimal session contract: the `chat` subset of `LLMProvider`, plus optional detailed streaming. */
+export interface LLMSession extends Pick<LLMProvider, "chat"> {
   streamDetailed?(messages: readonly ChatMessage[], opts?: ChatStreamOptions): AsyncIterable<ChatStreamChunk>;
 }
 export interface ModelRegistry { tier(alias: TierAlias): LLMProvider; reconfigure(tiers: Readonly<Record<string, LLMProviderConfig>>, factory: (cfg: LLMProviderConfig) => LLMProvider): void; tokenUsage: Map<string, { input: number; output: number }>; }
